@@ -1,0 +1,10 @@
+addr: ":8080"
+request_timeout: 5m
+keys:
+  - key: ib_dev_change_me
+    name: dev
+    org: dev-org
+    project: default
+    allow: [fast]
+aliases:
+  fast: llama3.2
