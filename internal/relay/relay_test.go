@@ -103,3 +103,32 @@ func TestListenerSurfacesRemoteError(t *testing.T) {
 	}
 	_ = nats.ErrTimeout
 }
+
+func TestDeleteQueued(t *testing.T) {
+	_, js := testutil.RunNATS(t)
+	ctx := context.Background()
+	if err := wire.EnsureStreams(ctx, js); err != nil {
+		t.Fatal(err)
+	}
+	// Publish a request and capture seq
+	seq, err := relay.Publish(ctx, js, relay.Request{
+		Model: "m1", Org: "acme", Project: "prod", KeyID: "k1", Alias: "fast",
+		ReqID: "r4", Kind: "chat", Deadline: time.Now().Add(time.Minute),
+		Body: []byte(`{"model":"fast"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First DeleteQueued call succeeds (message exists)
+	if err := relay.DeleteQueued(ctx, js, seq); err != nil {
+		t.Fatalf("first DeleteQueued failed: %v", err)
+	}
+	// Second call with same seq returns nil (already deleted, lost race)
+	if err := relay.DeleteQueued(ctx, js, seq); err != nil {
+		t.Fatalf("second DeleteQueued failed: %v", err)
+	}
+	// Call with bogus seq also returns nil (best-effort, unsuccessful delete)
+	if err := relay.DeleteQueued(ctx, js, 999999); err != nil {
+		t.Fatalf("bogus seq DeleteQueued failed: %v", err)
+	}
+}

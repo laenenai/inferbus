@@ -114,7 +114,9 @@ func DeleteQueued(ctx context.Context, js jetstream.JetStream, seq uint64) error
 	if err != nil {
 		return err
 	}
-	if err := s.DeleteMsg(ctx, seq); err != nil && !errors.Is(err, jetstream.ErrMsgNotFound) {
+	if err := s.DeleteMsg(ctx, seq); err != nil &&
+		!errors.Is(err, jetstream.ErrMsgDeleteUnsuccessful) &&
+		!errors.Is(err, jetstream.ErrMsgNotFound) {
 		return err
 	}
 	return nil
