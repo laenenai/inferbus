@@ -406,7 +406,7 @@ func TestM3FullLoop(t *testing.T) {
 	})
 
 	// The gateway's own KVIAM watch has its own (bounded, see kviam.go's
-	// kvWatchRefreshInterval) propagation delay on top of the KV bucket
+	// kvProbeInterval) propagation delay on top of the KV bucket
 	// itself already reflecting the deletion, so poll the actual
 	// client-visible behavior (repeating the real request) rather than
 	// assuming one successful KV Get above means the gateway has caught up

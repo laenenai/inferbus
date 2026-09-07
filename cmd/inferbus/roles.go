@@ -220,6 +220,8 @@ func runControlplane(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, "controlplane: postgres:", err)
 		return 1
 	}
+	// M7: close the pool on every exit path, not just the happy one.
+	defer pgStore.Close()
 	store := pgStore.Workspace("controlplane")
 	nc, js, err := connect(cfg.NATSURL, "controlplane")
 	if err != nil {
@@ -227,7 +229,11 @@ func runControlplane(args []string, stdout io.Writer) int {
 		return 1
 	}
 	defer nc.Close()
-	runner := controlplane.NewRunner(cfg, nc, js, store)
+	// I4 fix: the relay needs the RAW pgStore (implements delivery.Drainer
+	// directly), not the workspace-scoped store used for aggregates and
+	// projectors — see controlplane.RunRelay's doc comment for why the
+	// latter can never drive the relay against real Postgres.
+	runner := controlplane.NewRunner(cfg, nc, js, store, pgStore)
 	fmt.Fprintf(stdout, "controlplane listening on %s\n", cfg.Addr)
 	if err := runner.Run(ctx); err != nil && err != context.Canceled {
 		fmt.Fprintln(stdout, "controlplane:", err)

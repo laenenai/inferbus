@@ -8,7 +8,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/laenenai/es-lite/delivery"
-	"github.com/laenenai/es-lite/es"
 	"github.com/laenenai/es-lite/natsjs"
 )
 
@@ -40,23 +39,33 @@ func EnsureControlStream(ctx context.Context, js jetstream.JetStream) error {
 // RunRelay tails store's event log and republishes every event onto
 // CONTROL_EVENTS through a natsjs.Publisher, blocking until ctx is done.
 //
-// Backend selection follows the es-lite delivery package (api-notes
-// "go doc -all .../delivery" section):
+// store is deliberately typed any, not es.Store (I4 fix): the two real
+// backends satisfy entirely disjoint interfaces on entirely disjoint Go
+// types, and neither one is also an es.Store —
 //
-//   - Postgres's Store.Drain is gap-safe (claims rows) and implements
-//     delivery.Drainer ("the Postgres Store.Drain satisfies it"), so it
-//     drives a delivery.Relay — the same wiring as es-lite's own
-//     cmd/es-relayd/main.go: `delivery.NewRelay(store, publish, cfg)`.
+//   - Postgres's *postgres.Store.Drain is gap-safe (claims rows) and
+//     implements delivery.Drainer ("the Postgres Store.Drain satisfies
+//     it"), so it drives a delivery.Relay — the same wiring as es-lite's
+//     own cmd/es-relayd/main.go: `delivery.NewRelay(store, publish, cfg)`.
+//     Critically, this is the RAW, workspace-UNSCOPED *postgres.Store
+//     (postgres.Open's return value): the workspace-scoped es.Store
+//     returned by (*postgres.Store).Workspace(id) — the one every
+//     aggregate.Runtime and projector in this package uses — implements
+//     neither delivery.Drainer nor delivery.Checkpoints at all. Passing
+//     that workspace-scoped store here (as this package's callers used to)
+//     silently fell through to the error return below on every real
+//     Postgres deployment, so the embedded relay never relayed a single
+//     event: see TestRunRelay_Postgres.
 //   - SQLite has no Drainer: "its single-writer log has a gap-free cursor,
 //     so no claim is needed." Instead sqlite.Store implements
-//     delivery.Checkpoints directly ("Checkpoints ... The sqlite.Store
-//     implements it."), so it drives a delivery.Poller with the store
-//     itself as both the Source (ReadAll) and the Checkpoints.
+//     delivery.Checkpoints AND delivery.Source (ReadAll) directly
+//     ("Checkpoints ... The sqlite.Store implements it."), so it drives a
+//     delivery.Poller with the store itself as both.
 //
 // Both Poller.Run and Relay.Run "drain until ctx is cancelled ... Returns
 // ctx.Err() on cancellation", giving RunRelay clean shutdown with no
 // goroutine leak for free.
-func RunRelay(ctx context.Context, store es.Store, js jetstream.JetStream) error {
+func RunRelay(ctx context.Context, store any, js jetstream.JetStream) error {
 	pub := natsjs.NewPublisher(js, natsjs.DefaultSubject)
 
 	if drainer, ok := store.(delivery.Drainer); ok {
@@ -64,7 +73,11 @@ func RunRelay(ctx context.Context, store es.Store, js jetstream.JetStream) error
 		return relay.Run(ctx)
 	}
 	if cp, ok := store.(delivery.Checkpoints); ok {
-		poller := delivery.NewPoller(store, cp, pub.Handle, delivery.Config{
+		src, ok := store.(delivery.Source)
+		if !ok {
+			return fmt.Errorf("controlplane: store %T implements delivery.Checkpoints but not delivery.Source; RunRelay needs both for the Poller path", store)
+		}
+		poller := delivery.NewPoller(src, cp, pub.Handle, delivery.Config{
 			Subscriber: controlRelaySubscriber,
 		})
 		return poller.Run(ctx)

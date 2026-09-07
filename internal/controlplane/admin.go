@@ -542,6 +542,10 @@ func (a *Admin) createOrg(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, errTypeInvalidRequest, "id must be a non-empty slug")
 		return
 	}
+	if strings.TrimSpace(body.Name) == "" {
+		writeAdminError(w, http.StatusBadRequest, errTypeInvalidRequest, "name must not be empty")
+		return
+	}
 
 	ownerSub := strings.TrimSpace(body.OwnerSub)
 	if ownerSub == "" {
@@ -627,6 +631,10 @@ func (a *Admin) renameOrg(w http.ResponseWriter, r *http.Request) {
 	}
 	var body renameOrgRequest
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" {
+		writeAdminError(w, http.StatusBadRequest, errTypeInvalidRequest, "name must not be empty")
 		return
 	}
 	sid, err := es.NewStreamID(org.StreamType, orgID)
@@ -728,6 +736,10 @@ func (a *Admin) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validSlug(body.ID) {
 		writeAdminError(w, http.StatusBadRequest, errTypeInvalidRequest, "id must be a non-empty slug")
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" {
+		writeAdminError(w, http.StatusBadRequest, errTypeInvalidRequest, "name must not be empty")
 		return
 	}
 	sid, err := es.NewStreamID(org.StreamType, orgID)

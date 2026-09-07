@@ -57,14 +57,28 @@ type Runner struct {
 	nc    *nats.Conn
 	js    jetstream.JetStream
 	store es.Store
+
+	// relaySource is what RunRelay actually drains/polls (I4 fix). It is
+	// NOT always store: for Postgres, store is a workspace-scoped es.Store
+	// (needed by every aggregate.Runtime and projector here), but the only
+	// thing that implements delivery.Drainer is the RAW, workspace-
+	// unscoped *postgres.Store — see relay.go's RunRelay doc comment for
+	// the full rationale. Defaults to store when the caller passes nil
+	// (e.g. every sqlite-backed test: sqlite.Store is both an es.Store and
+	// a delivery.Checkpoints/Source, so there is nothing else to pass).
+	relaySource any
 }
 
-func NewRunner(cfg Config, nc *nats.Conn, js jetstream.JetStream, store es.Store) *Runner {
+func NewRunner(cfg Config, nc *nats.Conn, js jetstream.JetStream, store es.Store, relaySource any) *Runner {
+	if relaySource == nil {
+		relaySource = store
+	}
 	return &Runner{
-		cfg:   cfg,
-		nc:    nc,
-		js:    js,
-		store: store,
+		cfg:         cfg,
+		nc:          nc,
+		js:          js,
+		store:       store,
+		relaySource: relaySource,
 	}
 }
 
@@ -180,7 +194,7 @@ func runProjectors(parent context.Context, store es.Store, js jetstream.JetStrea
 // context.Canceled (review finding C1 — a config error causing an
 // immediate return must be observable exactly like a later fail-stop, not
 // silently dropped).
-func runRelay(parent context.Context, store es.Store, js jetstream.JetStream) (cancel context.CancelFunc, stopped <-chan struct{}, failed <-chan struct{}) {
+func runRelay(parent context.Context, store any, js jetstream.JetStream) (cancel context.CancelFunc, stopped <-chan struct{}, failed <-chan struct{}) {
 	relayCtx, cancelRelay := context.WithCancel(parent)
 	stoppedCh := make(chan struct{})
 	failedCh := make(chan struct{})
@@ -203,7 +217,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("controlplane: ensure control stream: %w", err)
 	}
 
-	cancelRelay, relayStopped, relayFailed := runRelay(ctx, r.store, r.js)
+	cancelRelay, relayStopped, relayFailed := runRelay(ctx, r.relaySource, r.js)
 	stopRelay := func() {
 		cancelRelay()
 		<-relayStopped

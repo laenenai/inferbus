@@ -196,6 +196,51 @@ func TestAdmin_CreateOrg_OIDCDefaultsOwnerSubToCaller(t *testing.T) {
 	}
 }
 
+// TestAdmin_RequiresNonEmptyName is finding M1: createOrg, renameOrg, and
+// createProject must all 400 on a blank (empty or whitespace-only) name
+// rather than silently accepting one and letting it flow through to the
+// event log.
+func TestAdmin_RequiresNonEmptyName(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret"}
+	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
+	mux := f.admin.Routes()
+
+	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
+		"id": "acme", "name": "  ", "owner_sub": "dev",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("createOrg blank name: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if typ := decodeErrorType(t, rec); typ != errTypeInvalidRequest {
+		t.Fatalf("createOrg blank name: error.type = %q, want %q", typ, errTypeInvalidRequest)
+	}
+
+	rec = doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
+		"id": "acme", "name": "Acme", "owner_sub": "dev",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create org: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doRequest(t, mux, http.MethodPatch, "/admin/v1/orgs/acme", "s3cret", map[string]any{"name": ""})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("renameOrg blank name: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if typ := decodeErrorType(t, rec); typ != errTypeInvalidRequest {
+		t.Fatalf("renameOrg blank name: error.type = %q, want %q", typ, errTypeInvalidRequest)
+	}
+
+	rec = doRequest(t, mux, http.MethodPost, "/admin/v1/orgs/acme/projects", "s3cret", map[string]any{
+		"id": "proj-1", "name": "   ",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("createProject blank name: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if typ := decodeErrorType(t, rec); typ != errTypeInvalidRequest {
+		t.Fatalf("createProject blank name: error.type = %q, want %q", typ, errTypeInvalidRequest)
+	}
+}
+
 func TestAdmin_CreateKey_PlaintextOnce_ListHidesHashAndPlaintext(t *testing.T) {
 	cfg := Config{BootstrapToken: "s3cret"}
 	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
