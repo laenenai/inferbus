@@ -24,6 +24,8 @@ func run(args []string, stdout io.Writer) int {
 		return runGateway(args[1:], stdout)
 	case "worker":
 		return runWorker(args[1:], stdout)
+	case "controlplane":
+		return runControlplane(args[1:], stdout)
 	case "harvester":
 		return notImplemented(args[0], stdout)
 	default:
@@ -39,5 +41,5 @@ func notImplemented(role string, stdout io.Writer) int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, "usage: inferbus <gateway|worker|harvester|version>\n")
+	fmt.Fprint(w, "usage: inferbus <gateway|worker|controlplane|harvester|version>\n")
 }

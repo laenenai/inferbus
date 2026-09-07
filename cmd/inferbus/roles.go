@@ -14,6 +14,9 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/laenenai/es-lite/postgres"
+
+	"github.com/laenenai/inferbus/internal/controlplane"
 	"github.com/laenenai/inferbus/internal/engine"
 	"github.com/laenenai/inferbus/internal/engine/bifrostengine"
 	"github.com/laenenai/inferbus/internal/engine/openaihttp"
@@ -156,6 +159,45 @@ func runWorker(args []string, stdout io.Writer) int {
 	defer stop()
 	if err := worker.New(nc, js, engines, cfg).Run(ctx); err != nil && err != context.Canceled {
 		fmt.Fprintln(stdout, "worker:", err)
+		return 1
+	}
+	return 0
+}
+
+func runControlplane(args []string, stdout io.Writer) int {
+	fs := flag.NewFlagSet("controlplane", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	cfgPath := fs.String("config", "", "path to controlplane YAML config (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *cfgPath == "" {
+		fmt.Fprintln(stdout, "controlplane: -config is required")
+		return 2
+	}
+	cfg, err := controlplane.LoadConfig(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(stdout, "controlplane:", err)
+		return 1
+	}
+	ctx, stop := signalContext()
+	defer stop()
+	pgStore, err := postgres.Open(ctx, cfg.PostgresDSN)
+	if err != nil {
+		fmt.Fprintln(stdout, "controlplane: postgres:", err)
+		return 1
+	}
+	store := pgStore.Workspace("controlplane")
+	nc, js, err := connect(cfg.NATSURL, "controlplane")
+	if err != nil {
+		fmt.Fprintln(stdout, "controlplane: nats:", err)
+		return 1
+	}
+	defer nc.Close()
+	runner := controlplane.NewRunner(cfg, nc, js, store)
+	fmt.Fprintf(stdout, "controlplane listening on %s\n", cfg.Addr)
+	if err := runner.Run(ctx); err != nil && err != context.Canceled {
+		fmt.Fprintln(stdout, "controlplane:", err)
 		return 1
 	}
 	return 0

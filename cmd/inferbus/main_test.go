@@ -29,7 +29,7 @@ func TestRunNoArgsShowsUsage(t *testing.T) {
 	if code := run(nil, &out); code == 0 {
 		t.Fatal("no args should not exit 0")
 	}
-	for _, want := range []string{"gateway", "worker", "harvester"} {
+	for _, want := range []string{"gateway", "worker", "harvester", "controlplane"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("usage %q missing %q", out.String(), want)
 		}
@@ -50,5 +50,15 @@ func TestWorkerRequiresConfig(t *testing.T) {
 	var out bytes.Buffer
 	if code := run([]string{"worker"}, &out); code == 0 {
 		t.Fatal("worker without -config should fail")
+	}
+}
+
+func TestControlplaneRequiresConfig(t *testing.T) {
+	var out bytes.Buffer
+	if code := run([]string{"controlplane"}, &out); code == 0 {
+		t.Fatal("controlplane without -config should fail")
+	}
+	if !strings.Contains(out.String(), "-config") {
+		t.Fatalf("output %q should mention -config", out.String())
 	}
 }
