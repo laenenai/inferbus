@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -29,6 +30,9 @@ type Gateway struct {
 }
 
 func New(nc *nats.Conn, js jetstream.JetStream, cfg Config) *Gateway {
+	if cfg.RequestTimeout == 0 {
+		cfg.RequestTimeout = 5 * time.Minute
+	}
 	return &Gateway{nc: nc, js: js, cfg: cfg}
 }
 
@@ -51,7 +55,7 @@ func oaiError(w http.ResponseWriter, status int, typ, msg string) {
 func (g *Gateway) authenticate(r *http.Request) (KeyConfig, bool) {
 	auth := r.Header.Get("Authorization")
 	const prefix = "Bearer "
-	if len(auth) <= len(prefix) {
+	if !strings.HasPrefix(auth, prefix) || len(auth) <= len(prefix) {
 		return KeyConfig{}, false
 	}
 	presented := []byte(auth[len(prefix):])
@@ -141,36 +145,56 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Client-disconnect watcher: race r.Context()'s cancellation against our
-	// own "done" signal so we can tell a genuine mid-flight disconnect apart
-	// from the request simply finishing normally. net/http cancels
-	// r.Context() itself once the handler returns, so without the done race
-	// this goroutine would fire relay.Cancel/DeleteQueued after *every*
-	// request, successful or not. done is closed only after streamOut /
-	// resultOut return, and always before chatCompletions itself returns
-	// (and therefore before the server-side context cancellation can
-	// happen), so the select below can only take the ctx.Done() branch on a
-	// real disconnect while a read is still in flight. Either way the
-	// goroutine exits promptly — it never outlives the request.
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			_ = relay.Cancel(g.nc, reqID)
-			_ = relay.DeleteQueued(context.Background(), g.js, seq)
-		}
-	}()
-
+	// Client disconnect is detected synchronously, inline in the read loops
+	// below, rather than with a separate goroutine watching ctx.Done(). An
+	// earlier version of this handler raced a background goroutine's
+	// <-ctx.Done() against a "done" signal closed after streamOut/resultOut
+	// returned: the intent was "only clean up if ctx died before the
+	// handler finished on its own". That doesn't work, because ctx dying is
+	// *also* what makes streamOut/resultOut return early on a real
+	// disconnect (their read loop is bounded by dctx, a child of ctx, so
+	// canceling ctx unblocks l.Next(dctx) immediately) — so on a genuine
+	// disconnect, both "ctx.Done()" and "done" become ready at essentially
+	// the same instant, and which case a Go select picks between two ready
+	// channels is undefined. Roughly half the time it picked "done" and
+	// silently skipped the cleanup call — confirmed by go test -race
+	// -count=5 failing 3/5 runs of TestClientDisconnectCancels with that
+	// version.
+	//
+	// The fix: streamOut/resultOut already distinguish dctx's own deadline
+	// firing from the *parent* ctx dying (client disconnect) by checking
+	// ctx.Err() — nil means only the per-request deadline expired, non-nil
+	// means the parent request context itself was canceled. That check is
+	// deterministic (no data race, no goroutine) and happens exactly once,
+	// in the same place the read loop already decides how to respond, so
+	// cleanup is invoked from there directly instead of via a racing
+	// watcher.
 	if req.Stream {
-		g.streamOut(ctx, w, l, deadline)
+		g.streamOut(ctx, w, l, deadline, reqID, seq)
 	} else {
-		g.resultOut(ctx, w, l, deadline)
+		g.resultOut(ctx, w, l, deadline, reqID, seq)
 	}
-	close(done)
 }
 
-func (g *Gateway) streamOut(ctx context.Context, w http.ResponseWriter, l *relay.Listener, deadline time.Time) {
+// clientDisconnected reports whether ctx — the caller's original request
+// context, not the per-call deadline context derived from it — was
+// canceled. Used to tell "client hung up" apart from "our own deadline
+// fired", which look identical from inside l.Next(dctx)'s returned error
+// alone.
+func clientDisconnected(ctx context.Context) bool { return ctx.Err() != nil }
+
+// cleanupDisconnected fires the gateway's half of the two-phase client
+// cancel: a best-effort delete of the message if it's still queued, and a
+// cancel publish for a worker that already picked it up. Both are
+// best-effort (see relay.DeleteQueued / relay.Cancel) — losing either race
+// is fine, the worker's own deadline (KindDone/KindResult vs no terminal
+// frame) is the backstop.
+func (g *Gateway) cleanupDisconnected(reqID string, seq uint64) {
+	_ = relay.Cancel(g.nc, reqID)
+	_ = relay.DeleteQueued(context.Background(), g.js, seq)
+}
+
+func (g *Gateway) streamOut(ctx context.Context, w http.ResponseWriter, l *relay.Listener, deadline time.Time, reqID string, seq uint64) {
 	fl, _ := w.(http.Flusher)
 	wroteHeader := false
 	writeHead := func() {
@@ -201,7 +225,9 @@ func (g *Gateway) streamOut(ctx context.Context, w http.ResponseWriter, l *relay
 			return
 		}
 		if err != nil {
-			if !wroteHeader {
+			if clientDisconnected(ctx) {
+				g.cleanupDisconnected(reqID, seq)
+			} else if !wroteHeader {
 				oaiError(w, http.StatusGatewayTimeout, "timeout", "no response from worker")
 			}
 			return
@@ -217,7 +243,7 @@ func (g *Gateway) streamOut(ctx context.Context, w http.ResponseWriter, l *relay
 	}
 }
 
-func (g *Gateway) resultOut(ctx context.Context, w http.ResponseWriter, l *relay.Listener, deadline time.Time) {
+func (g *Gateway) resultOut(ctx context.Context, w http.ResponseWriter, l *relay.Listener, deadline time.Time, reqID string, seq uint64) {
 	dctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	for {
@@ -231,7 +257,11 @@ func (g *Gateway) resultOut(ctx context.Context, w http.ResponseWriter, l *relay
 			oaiError(w, http.StatusBadGateway, "protocol_error", "stream ended without a result")
 			return
 		case err != nil:
-			oaiError(w, http.StatusGatewayTimeout, "timeout", "no response from worker")
+			if clientDisconnected(ctx) {
+				g.cleanupDisconnected(reqID, seq)
+			} else {
+				oaiError(w, http.StatusGatewayTimeout, "timeout", "no response from worker")
+			}
 			return
 		}
 		if m.Kind == wire.KindResult {
