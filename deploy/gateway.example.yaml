@@ -8,3 +8,12 @@ keys:
     allow: [fast]
 aliases:
   fast: llama3.2
+# iam:
+#   mode: kv  # default is "static" (the keys/aliases above). "kv" instead
+#             # reads keys and aliases live from the control plane's
+#             # ALIASES/KEYS NATS KV buckets — the keys/aliases fields
+#             # above are then ignored. Requires the gateway to reach the
+#             # same NATS JetStream the controlplane process publishes
+#             # those buckets to; the gateway waits (with backoff) for
+#             # them to appear rather than failing if the control plane
+#             # hasn't started yet.

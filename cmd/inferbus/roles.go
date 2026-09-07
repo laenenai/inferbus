@@ -99,7 +99,26 @@ func runGateway(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, "gateway: streams:", err)
 		return 1
 	}
-	g := gateway.New(nc, js, cfg)
+	var g *gateway.Gateway
+	switch cfg.IAM.Mode {
+	case "kv":
+		// NewKVIAM blocks (with backoff) until the control plane's
+		// ALIASES/KEYS KV buckets exist — see kviam.go's binding ruling
+		// #2 doc comment. It only returns an error if ctx is canceled
+		// first (e.g. SIGTERM during startup), never on a merely-missing
+		// bucket.
+		kv, err := gateway.NewKVIAM(ctx, js)
+		if err != nil {
+			fmt.Fprintln(stdout, "gateway: kv iam:", err)
+			return 1
+		}
+		g = gateway.NewWithIAM(nc, js, cfg, kv)
+	case "static", "":
+		g = gateway.New(nc, js, cfg)
+	default:
+		fmt.Fprintf(stdout, "gateway: unknown iam.mode %q\n", cfg.IAM.Mode)
+		return 1
+	}
 	srv := &http.Server{Addr: cfg.Addr, Handler: g.Routes()}
 	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
 	fmt.Fprintf(stdout, "gateway listening on %s\n", cfg.Addr)

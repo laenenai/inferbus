@@ -5,7 +5,6 @@ package gateway
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,13 +26,30 @@ type Gateway struct {
 	nc  *nats.Conn
 	js  jetstream.JetStream
 	cfg Config
+	iam iamProvider
 }
 
+// New builds a Gateway in the default STATIC IAM mode: key auth and alias
+// resolution both come from cfg's own Keys/Aliases, exactly as before
+// Task 11 introduced the iamProvider seam. Every pre-existing gateway test
+// keeps using this constructor unchanged.
 func New(nc *nats.Conn, js jetstream.JetStream, cfg Config) *Gateway {
+	return newGateway(nc, js, cfg, newStaticIAM(cfg))
+}
+
+// NewWithIAM builds a Gateway backed by an explicit iamProvider — used for
+// `iam.mode: kv` (cmd/inferbus/roles.go constructs a *KVIAM and passes it
+// here) and by tests that want to exercise KVIAM directly through the
+// gateway's HTTP surface.
+func NewWithIAM(nc *nats.Conn, js jetstream.JetStream, cfg Config, iam iamProvider) *Gateway {
+	return newGateway(nc, js, cfg, iam)
+}
+
+func newGateway(nc *nats.Conn, js jetstream.JetStream, cfg Config, iam iamProvider) *Gateway {
 	if cfg.RequestTimeout == 0 {
 		cfg.RequestTimeout = 5 * time.Minute
 	}
-	return &Gateway{nc: nc, js: js, cfg: cfg}
+	return &Gateway{nc: nc, js: js, cfg: cfg, iam: iam}
 }
 
 func (g *Gateway) Routes() *http.ServeMux {
@@ -58,13 +74,7 @@ func (g *Gateway) authenticate(r *http.Request) (KeyConfig, bool) {
 	if !strings.HasPrefix(auth, prefix) || len(auth) <= len(prefix) {
 		return KeyConfig{}, false
 	}
-	presented := []byte(auth[len(prefix):])
-	for _, k := range g.cfg.Keys {
-		if subtle.ConstantTimeCompare(presented, []byte(k.Key)) == 1 {
-			return k, true
-		}
-	}
-	return KeyConfig{}, false
+	return g.iam.AuthenticateKey(auth[len(prefix):])
 }
 
 func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +92,7 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 		Data   []model `json:"data"`
 	}{Object: "list", Data: []model{}}
 	for _, alias := range key.Allow {
-		if _, exists := g.cfg.Aliases[alias]; exists {
+		if _, exists := g.iam.ResolveAlias(key.Org, alias); exists {
 			out.Data = append(out.Data, model{ID: alias, Object: "model"})
 		}
 	}
@@ -120,7 +130,7 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		oaiError(w, http.StatusBadRequest, "invalid_request_error", "body must be a JSON object with a model field")
 		return
 	}
-	target, exists := g.cfg.Aliases[req.Model]
+	target, exists := g.iam.ResolveAlias(key.Org, req.Model)
 	if !exists {
 		oaiError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("unknown model alias %q", req.Model))
 		return
