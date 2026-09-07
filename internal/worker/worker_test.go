@@ -30,12 +30,21 @@ func startWorker(t *testing.T, eng ibengine.Engine) (*nats.Conn, jetstream.JetSt
 // graceful shutdown mid-request.
 func startWorkerCancelable(t *testing.T, eng ibengine.Engine) (*nats.Conn, jetstream.JetStream, context.CancelFunc) {
 	t.Helper()
+	return startWorkerWithModel(t, eng, worker.ModelConfig{Name: "m1", MaxInflight: 2})
+}
+
+// startWorkerWithModel is like startWorkerCancelable but lets the caller
+// supply the model's full config (engine/provider) rather than the bare
+// {Name, MaxInflight} default — used by tests that need to observe how a
+// specific engine/provider combination is attributed on usage events.
+func startWorkerWithModel(t *testing.T, eng ibengine.Engine, mc worker.ModelConfig) (*nats.Conn, jetstream.JetStream, context.CancelFunc) {
+	t.Helper()
 	nc, js := testutil.RunNATS(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	w := worker.New(nc, js, map[string]ibengine.Engine{"m1": eng}, worker.Config{
 		WorkerID: "w-test",
-		Models:   []worker.ModelConfig{{Name: "m1", MaxInflight: 2}},
+		Models:   []worker.ModelConfig{mc},
 	})
 	ready := make(chan struct{})
 	go func() { _ = w.RunReady(ctx, ready) }()
@@ -284,7 +293,12 @@ func TestNonStreamEngineError(t *testing.T) {
 	eng := &testutil.FakeEngine{
 		Err: &ibengine.Error{Code: "upstream_error", Message: "boom", HTTPStatus: 502},
 	}
-	nc, js := startWorker(t, eng)
+	// mc.Engine ("bifrost") is the adapter name; mc.Provider ("anthropic")
+	// is the actual model provider and must be what lands on the usage
+	// event's Provider field, not the adapter name.
+	nc, js, _ := startWorkerWithModel(t, eng, worker.ModelConfig{
+		Name: "m1", MaxInflight: 2, Engine: "bifrost", Provider: "anthropic",
+	})
 
 	sub, err := nc.SubscribeSync("metering.usage.>")
 	if err != nil {
@@ -322,6 +336,9 @@ func TestNonStreamEngineError(t *testing.T) {
 	}
 	if ev.Status != "error" {
 		t.Fatalf("usage event = %+v", ev)
+	}
+	if ev.Provider != "anthropic" {
+		t.Fatalf("usage event Provider = %q, want %q (mc.Provider must win over mc.Engine)", ev.Provider, "anthropic")
 	}
 }
 
@@ -440,6 +457,145 @@ func TestNonStreamShutdown(t *testing.T) {
 	}
 	if ev.Status != "canceled" || ev.ErrorCode != "worker_shutdown" {
 		t.Fatalf("usage event = %+v", ev)
+	}
+}
+
+// TestStreamZeroUsageMarkedEstimated covers I5: a successful streaming
+// request whose engine never reported usage (all-zero) must still meter as
+// "ok", but with Estimated set so downstream accounting knows the token
+// counts are not to be trusted as exact.
+func TestStreamZeroUsageMarkedEstimated(t *testing.T) {
+	eng := &testutil.FakeEngine{
+		Chunks:     []string{`{"c":0}`, `{"c":1}`},
+		FinalUsage: wire.Usage{}, // upstream never sent usage
+	}
+	nc, js := startWorker(t, eng)
+
+	sub, err := nc.SubscribeSync("metering.usage.>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	l := publishAndListen(t, nc, js, "req-zero-usage", time.Now().Add(time.Minute))
+	if _, err := drain(t, l); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sub.NextMsg(10 * time.Second)
+	if err != nil {
+		t.Fatal("no usage event for zero-usage stream")
+	}
+	var ev wire.UsageEvent
+	if err := json.Unmarshal(raw.Data, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Status != "ok" {
+		t.Fatalf("usage event Status = %q, want ok", ev.Status)
+	}
+	if !ev.Estimated {
+		t.Fatalf("usage event Estimated = false, want true for all-zero usage")
+	}
+}
+
+// panicEngine is a minimal ibengine.Engine whose ChatStream always panics,
+// used to exercise the worker's per-message panic recovery (I7): the
+// panicking goroutine must not take the worker process down, the client
+// must get a normal RemoteError, and the worker must remain able to serve
+// subsequent requests.
+type panicEngine struct{}
+
+func (panicEngine) Chat(ctx context.Context, model string, body json.RawMessage) (json.RawMessage, wire.Usage, error) {
+	panic("boom: chat")
+}
+
+func (panicEngine) ChatStream(ctx context.Context, model string, body json.RawMessage, emit func(json.RawMessage) error) (wire.Usage, error) {
+	panic("boom: chat stream")
+}
+
+func TestHandlePanicRecovered(t *testing.T) {
+	// One worker process serving two models: "m1" always panics, "m2" is a
+	// normal FakeEngine. This lets the test prove the panic doesn't take
+	// the worker process (or its other consumers) down with it, rather
+	// than just proving a fresh worker can be started elsewhere.
+	nc, js := testutil.RunNATS(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	okEngine := &testutil.FakeEngine{FinalUsage: wire.Usage{PromptTokens: 1, CompletionTokens: 1}}
+	w := worker.New(nc, js, map[string]ibengine.Engine{
+		"m1": panicEngine{},
+		"m2": okEngine,
+	}, worker.Config{
+		WorkerID: "w-test",
+		Models: []worker.ModelConfig{
+			{Name: "m1", MaxInflight: 2},
+			{Name: "m2", MaxInflight: 2},
+		},
+	})
+	ready := make(chan struct{})
+	go func() { _ = w.RunReady(ctx, ready) }()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker not ready")
+	}
+
+	sub, err := nc.SubscribeSync("metering.usage.>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	publish := func(model, reqID string) *relay.Listener {
+		t.Helper()
+		l, err := relay.Listen(nc, reqID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(l.Close)
+		_, err = relay.Publish(context.Background(), js, relay.Request{
+			Model: model, Org: "acme", Project: "prod", KeyID: "k1", Alias: "fast",
+			ReqID: reqID, Kind: "chat", Deadline: time.Now().Add(time.Minute),
+			Body: []byte(`{"model":"fast","stream":true,"messages":[]}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+
+	l1 := publish("m1", "req-panic")
+	_, drainErr := drain(t, l1)
+	var re *relay.RemoteError
+	if !errors.As(drainErr, &re) {
+		t.Fatalf("err = %v, want a RemoteError", drainErr)
+	}
+	if re.Err.Code != "worker_panic" || re.Err.HTTPStatus != 500 {
+		t.Fatalf("remote error = %+v", re.Err)
+	}
+
+	raw, err := sub.NextMsg(10 * time.Second)
+	if err != nil {
+		t.Fatal("no usage event after panic")
+	}
+	var ev wire.UsageEvent
+	if err := json.Unmarshal(raw.Data, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Status != "error" || ev.ErrorCode != "worker_panic" {
+		t.Fatalf("usage event = %+v", ev)
+	}
+
+	// The worker process (and its other model's consumer) must still be
+	// alive: a second request, on the same worker, for a different (sane)
+	// model succeeds normally.
+	l2 := publish("m2", "req-after-panic")
+	msgs, err := drain(t, l2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) == 0 || msgs[len(msgs)-1].Kind != wire.KindDone {
+		t.Fatalf("post-panic request did not complete: %+v", msgs)
 	}
 }
 

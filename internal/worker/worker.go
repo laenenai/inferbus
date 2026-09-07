@@ -200,6 +200,23 @@ func (w *Worker) handle(ctx context.Context, mc ModelConfig, msg jetstream.Msg) 
 
 	eng := w.engines[mc.Name]
 
+	// A panic anywhere below (almost always inside a misbehaving engine
+	// implementation) must not take the whole worker process down with it
+	// — one bad request should cost this one message, not every other
+	// in-flight and future request on this worker. Recover it, tell the
+	// client with a normal error frame, ack (so it never redelivers into
+	// the same panic), and meter it like any other terminal error.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("worker: recovered panic in handle", "req", m.reqID, "model", mc.Name, "panic", r)
+			publish(wire.Message{Kind: wire.KindError, Error: &wire.WireError{
+				Code: "worker_panic", Message: fmt.Sprintf("worker panicked: %v", r), HTTPStatus: 500,
+			}})
+			_ = msg.Ack() // terminal outcome → ack (spec §7.1); never redeliver into the same panic
+			w.meter(m, mc, wire.Usage{}, "error", "worker_panic", true, 0, time.Since(start).Milliseconds(), queueMS)
+		}
+	}()
+
 	var probe struct {
 		Stream *bool `json:"stream"`
 	}
@@ -255,7 +272,12 @@ func (w *Worker) handle(ctx context.Context, mc ModelConfig, msg jetstream.Msg) 
 	case err == nil:
 		publish(wire.Message{Kind: wire.KindDone, Usage: &usage})
 		_ = msg.Ack()
-		w.meter(m, mc, usage, "ok", "", false, ttft, dur, queueMS)
+		// A successful stream that ends with all-zero usage almost always
+		// means the upstream never sent a usage payload (e.g. it ignored
+		// stream_options.include_usage), not that the request genuinely
+		// cost zero tokens — flag it so downstream accounting doesn't
+		// silently under-bill.
+		w.meter(m, mc, usage, "ok", "", usage == (wire.Usage{}), ttft, dur, queueMS)
 	case context.Cause(hctx) == canceled:
 		_ = msg.Ack() // canceled requests must never redeliver
 		w.meter(m, mc, usage, "canceled", "", true, ttft, dur, queueMS)
@@ -290,9 +312,22 @@ func terminalError(err error) wire.WireError {
 }
 
 func (w *Worker) meter(m reqMeta, mc ModelConfig, u wire.Usage, status, errCode string, estimated bool, ttft, dur, queueMS int64) {
+	// mc.Engine is the adapter name ("openai_http", "bifrost"), not the
+	// actual model provider. For a bifrost-routed model, mc.Provider (e.g.
+	// "anthropic", "openai") is the real provider and takes precedence; for
+	// an openai_http model there's no separate provider config, so fall
+	// back to the engine name, and finally to a fixed default so the field
+	// is never empty on a usage event.
+	provider := mc.Provider
+	if provider == "" {
+		provider = mc.Engine
+	}
+	if provider == "" {
+		provider = "openai_http"
+	}
 	ev := wire.UsageEvent{
 		ReqID: m.reqID, Org: m.org, Project: m.project, KeyID: m.keyID,
-		Alias: m.alias, Model: mc.Name, Provider: mc.Engine, Kind: m.kind,
+		Alias: m.alias, Model: mc.Name, Provider: provider, Kind: m.kind,
 		Status: status, ErrorCode: errCode, WorkerID: w.cfg.WorkerID,
 		Usage: u, TTFTMillis: ttft, DurationMillis: dur, QueueMillis: queueMS,
 		Estimated: estimated, TS: time.Now().UTC(),
