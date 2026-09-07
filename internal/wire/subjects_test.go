@@ -8,6 +8,9 @@ func TestSlug(t *testing.T) {
 		"Qwen/Qwen2.5-7B":    "qwen-qwen2-5-7b",
 		"model with spaces":  "model-with-spaces",
 		"UPPER_case.v1":      "upper-case-v1",
+		"a__b":               "a-b",
+		"-model-":            "model",
+		"org//model":         "org-model",
 	}
 	for in, want := range cases {
 		if got := Slug(in); got != want {
