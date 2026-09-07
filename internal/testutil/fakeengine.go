@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/infbus/infbus/internal/wire"
+	"github.com/laenenai/inferbus/internal/wire"
 )
 
 // FakeEngine is a deterministic in-process engine.Engine.

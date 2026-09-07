@@ -3,7 +3,7 @@ package worker_test
 import (
 	"testing"
 
-	"github.com/infbus/infbus/internal/worker"
+	"github.com/laenenai/inferbus/internal/worker"
 )
 
 // TestExampleConfigParses is a golden test against the checked-in

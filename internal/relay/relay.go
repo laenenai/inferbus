@@ -13,7 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/infbus/infbus/internal/wire"
+	"github.com/laenenai/inferbus/internal/wire"
 )
 
 type Request struct {
@@ -70,7 +70,7 @@ func Listen(nc *nats.Conn, reqID string) (*Listener, error) {
 	// surfaces to the caller as a frame-gap error in Next below (m.Seq !=
 	// l.next), not silently — but it does mean an unusually bursty/slow
 	// reader on a very chatty stream could still lose frames if it falls
-	// more than 256 frames behind. See cmd/infbus/roles.go's
+	// more than 256 frames behind. See cmd/inferbus/roles.go's
 	// nats.ErrorHandler for the connection-level slow-consumer signal.
 	ch := make(chan *nats.Msg, 256)
 	sub, err := nc.ChanSubscribe(wire.RespSubject(reqID), ch)

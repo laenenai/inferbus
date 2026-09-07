@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/infbus/infbus/internal/wire"
+	"github.com/laenenai/inferbus/internal/wire"
 )
 
 func TestFakeEngineErrEmptyChunks(t *testing.T) {

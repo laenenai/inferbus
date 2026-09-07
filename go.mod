@@ -1,4 +1,4 @@
-module github.com/infbus/infbus
+module github.com/laenenai/inferbus
 
 go 1.27.0
 

@@ -14,8 +14,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	ibengine "github.com/infbus/infbus/internal/engine"
-	"github.com/infbus/infbus/internal/wire"
+	ibengine "github.com/laenenai/inferbus/internal/engine"
+	"github.com/laenenai/inferbus/internal/wire"
 )
 
 type Worker struct {

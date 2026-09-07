@@ -12,8 +12,8 @@ func TestRunVersion(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if !strings.Contains(out.String(), "infbus") {
-		t.Fatalf("output %q does not contain infbus", out.String())
+	if !strings.Contains(out.String(), "inferbus") {
+		t.Fatalf("output %q does not contain inferbus", out.String())
 	}
 }
 

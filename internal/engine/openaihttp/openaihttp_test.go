@@ -10,8 +10,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	ibengine "github.com/infbus/infbus/internal/engine"
-	"github.com/infbus/infbus/internal/testutil"
+	ibengine "github.com/laenenai/inferbus/internal/engine"
+	"github.com/laenenai/inferbus/internal/testutil"
 )
 
 func TestChatStreamCollectsChunksAndUsage(t *testing.T) {
@@ -44,7 +44,9 @@ func TestChatNonStream(t *testing.T) {
 	if usage.PromptTokens != 3 {
 		t.Fatalf("usage = %+v", usage)
 	}
-	var parsed struct{ Object string `json:"object"` }
+	var parsed struct {
+		Object string `json:"object"`
+	}
 	if json.Unmarshal(body, &parsed) != nil || parsed.Object != "chat.completion" {
 		t.Fatalf("body = %s", body)
 	}
@@ -67,7 +69,7 @@ func TestUpstreamErrorMapped(t *testing.T) {
 // worker/deployment misconfiguration (bad API key, wrong endpoint, wrong
 // model id at the *upstream*), not something the calling client did wrong —
 // passing it straight through as our own 401/403/404 would misleadingly
-// suggest the caller's infbus credentials or request were at fault. Map it
+// suggest the caller's inferbus credentials or request were at fault. Map it
 // to a generic 502 upstream_error instead. 408/429/5xx must keep passing
 // through unchanged (that's the caller's own rate limit / retry signal).
 func TestUpstreamAuthErrorsMappedTo502(t *testing.T) {

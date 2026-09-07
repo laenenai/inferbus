@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/infbus/infbus/internal/gateway"
+	"github.com/laenenai/inferbus/internal/gateway"
 )
 
 // TestExampleConfigParses is a golden test against the checked-in

@@ -1,4 +1,4 @@
-// infbus is a single binary with role subcommands: gateway, worker, harvester.
+// inferbus is a single binary with role subcommands: gateway, worker, harvester.
 package main
 
 import (
@@ -18,7 +18,7 @@ func run(args []string, stdout io.Writer) int {
 	}
 	switch args[0] {
 	case "version":
-		fmt.Fprintf(stdout, "infbus %s\n", version)
+		fmt.Fprintf(stdout, "inferbus %s\n", version)
 		return 0
 	case "gateway":
 		return runGateway(args[1:], stdout)
@@ -39,5 +39,5 @@ func notImplemented(role string, stdout io.Writer) int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, "usage: infbus <gateway|worker|harvester|version>\n")
+	fmt.Fprint(w, "usage: inferbus <gateway|worker|harvester|version>\n")
 }

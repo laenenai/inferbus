@@ -13,8 +13,8 @@ import (
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 
-	ibengine "github.com/infbus/infbus/internal/engine"
-	"github.com/infbus/infbus/internal/wire"
+	ibengine "github.com/laenenai/inferbus/internal/engine"
+	"github.com/laenenai/inferbus/internal/wire"
 )
 
 type Config struct {
@@ -195,7 +195,7 @@ func mapError(berr *schemas.BifrostError) error {
 	// worker's provider config is wrong (bad API key, wrong upstream model
 	// id) — not something the calling client did. Map it to a generic 502
 	// upstream_error, same as internal/engine/openaihttp, so it doesn't
-	// misleadingly point the caller at their own infbus credentials or
+	// misleadingly point the caller at their own inferbus credentials or
 	// request. 408/429/5xx pass through unchanged.
 	if status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusNotFound {
 		return &ibengine.Error{Code: "upstream_error", Message: msg, HTTPStatus: http.StatusBadGateway}

@@ -8,10 +8,10 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/infbus ./cmd/infbus
+RUN CGO_ENABLED=0 go build -o /out/inferbus ./cmd/inferbus
 
 FROM alpine:3.20
-RUN adduser -D infbus
-COPY --from=build /out/infbus /usr/local/bin/infbus
-USER infbus
-ENTRYPOINT ["infbus"]
+RUN adduser -D inferbus
+COPY --from=build /out/inferbus /usr/local/bin/inferbus
+USER inferbus
+ENTRYPOINT ["inferbus"]

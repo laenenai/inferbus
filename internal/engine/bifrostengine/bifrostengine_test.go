@@ -8,8 +8,8 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 
-	ibengine "github.com/infbus/infbus/internal/engine"
-	"github.com/infbus/infbus/internal/testutil"
+	ibengine "github.com/laenenai/inferbus/internal/engine"
+	"github.com/laenenai/inferbus/internal/testutil"
 )
 
 func TestChatStreamThroughBifrost(t *testing.T) {

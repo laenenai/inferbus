@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-07
 **Status:** Draft for review
-**Working name:** `infbus` (used throughout; final naming is a mechanical find/replace before the first public push)
+**Working name:** `inferbus` (used throughout; final naming is a mechanical find/replace before the first public push)
 
 ## 1. Context & motivation
 
@@ -46,7 +46,7 @@ The laenen platform will consume this project as an upstream dependency. The pri
 | 7 | Aliases | Postgres source of truth, projected to NATS KV, gateways watch |
 | 8 | Usage storage | ClickHouse only (Postgres rollup dropped); harvester service |
 | 9 | Scope | Chat completions + embeddings |
-| 10 | Repo shape | Monorepo, one multi-command binary (`infbus gateway|worker|harvester`) |
+| 10 | Repo shape | Monorepo, one multi-command binary (`inferbus gateway|worker|harvester`) |
 | 11 | Go client | Not public; relay logic is gateway-internal |
 | 12 | Console | Mock in v1, functional app in v2 |
 
@@ -75,7 +75,7 @@ The laenen platform will consume this project as an upstream dependency. The pri
 
 ## 6. Components
 
-### 6.1 `infbus gateway`
+### 6.1 `inferbus gateway`
 
 - **Data-plane HTTP:** `POST /v1/chat/completions`, `POST /v1/embeddings`, `GET /v1/models`, `GET /healthz`, `GET /readyz`. OpenAI-compatible request/response bodies; streaming via SSE (`data: <chunk>` … `data: [DONE]`).
 - **Admin HTTP:** `/admin/v1/{orgs,projects,keys,aliases,usage}` — CRUD plus usage summaries proxied from ClickHouse. Auth: OIDC bearer tokens (any standard issuer; issuer/audience configured). Role model in §9.
@@ -88,7 +88,7 @@ The laenen platform will consume this project as an upstream dependency. The pri
 - **Alias projection:** on every alias mutation the admin API writes Postgres transactionally, then upserts the KV entry. On startup the gateway reconciles the `ALIASES` bucket from Postgres (KV is a pure, rebuildable projection — never authoritative, never hand-edited). `POST /admin/v1/aliases/resync` forces reconciliation.
 - **`GET /v1/models`** returns the *aliases* visible to the calling key (not concrete models) — aliases are the public vocabulary.
 
-### 6.2 `infbus worker`
+### 6.2 `inferbus worker`
 
 - **Config:** one local YAML file; no database, no control-plane access. Maps each served concrete model name to a Bifrost provider/model config.
 - **Loop:** one JetStream pull consumer per served model (durable `model-<slug>`), bounded concurrent handlers per model (config: `max_inflight`). In-progress ack extension (heartbeat) while a request runs; `MaxDeliver: 2` so a crashed worker's request is retried once.
@@ -96,7 +96,7 @@ The laenen platform will consume this project as an upstream dependency. The pri
 - **Usage:** on completion (or error/cancel) publish one usage event to `metering.usage.<org>.<project>.<model>` (fields in §10). Aborted streams set `estimated: true`.
 - **Advertisement:** heartbeat entry in the `MODELS` KV bucket (`worker.<worker_id>` → served models, versions, last-seen). Gateways use it for `/readyz`-style checks and ops visibility; TTL-expired entries drop out.
 
-### 6.3 `infbus harvester`
+### 6.3 `inferbus harvester`
 
 - Durable JetStream consumer on `METERING`; batches (size- and time-bounded) inserts into ClickHouse; acks after successful insert. At-least-once delivery + ClickHouse dedup (§10) = effectively exactly-once accounting.
 - Owns ClickHouse schema; migrations embedded and applied on startup.
@@ -173,8 +173,8 @@ V1 delivers a **visual mockup** (design canvas) covering: OIDC login; org/projec
 ## 13. Repo layout & deployment
 
 ```
-infbus/
-  cmd/infbus/            # single binary: gateway|worker|harvester subcommands
+inferbus/
+  cmd/inferbus/            # single binary: gateway|worker|harvester subcommands
   internal/gateway/      # HTTP, auth, alias resolution, admission, relay glue
   internal/worker/       # pull loop, Bifrost integration, usage publishing
   internal/harvester/    # METERING consumer, ClickHouse writer + migrations
@@ -223,6 +223,6 @@ infbus/
 
 ## 17. Open questions
 
-- Final project name/org (working name `infbus`).
+- Final project name/org (working name `inferbus`).
 - Bifrost config surface: how much of Bifrost's provider config to expose verbatim in worker YAML vs. wrap (decide at M2 with real Bifrost API in hand).
 - Whether laenen's private crypto plane returns as a middleware seam upstream or stays a private fork concern.

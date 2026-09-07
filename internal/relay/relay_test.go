@@ -10,9 +10,9 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/infbus/infbus/internal/relay"
-	"github.com/infbus/infbus/internal/testutil"
-	"github.com/infbus/infbus/internal/wire"
+	"github.com/laenenai/inferbus/internal/relay"
+	"github.com/laenenai/inferbus/internal/testutil"
+	"github.com/laenenai/inferbus/internal/wire"
 )
 
 func TestPublishSetsHeadersAndReturnsSeq(t *testing.T) {

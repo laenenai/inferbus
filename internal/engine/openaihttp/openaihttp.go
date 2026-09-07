@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"strings"
 
-	ibengine "github.com/infbus/infbus/internal/engine"
-	"github.com/infbus/infbus/internal/wire"
+	ibengine "github.com/laenenai/inferbus/internal/engine"
+	"github.com/laenenai/inferbus/internal/wire"
 )
 
 type Engine struct {
@@ -47,7 +47,7 @@ func (e *Engine) post(ctx context.Context, body []byte) (*http.Response, error) 
 		// engine config is wrong (bad API key, wrong base URL, wrong
 		// upstream model id) — not something the calling client did.
 		// Passing it straight through as our own 401/403/404 would
-		// misleadingly point the caller at their infbus credentials or
+		// misleadingly point the caller at their inferbus credentials or
 		// request instead. 408/429/5xx are left as-is: those are genuine
 		// rate-limit/retry signals worth forwarding.
 		if status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusNotFound {
@@ -163,8 +163,8 @@ func setModel(m map[string]json.RawMessage, model string) {
 func usageOf(b []byte) wire.Usage {
 	var probe struct {
 		Usage *struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
 			PromptTokensDetails struct {
 				CachedTokens int `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`

@@ -19,8 +19,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/infbus/infbus/internal/relay"
-	"github.com/infbus/infbus/internal/wire"
+	"github.com/laenenai/inferbus/internal/relay"
+	"github.com/laenenai/inferbus/internal/wire"
 )
 
 type Gateway struct {

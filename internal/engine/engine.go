@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/infbus/infbus/internal/wire"
+	"github.com/laenenai/inferbus/internal/wire"
 )
 
 type Engine interface {
@@ -34,4 +34,6 @@ type Error struct {
 	HTTPStatus int
 }
 
-func (e *Error) Error() string { return fmt.Sprintf("engine %s (%d): %s", e.Code, e.HTTPStatus, e.Message) }
+func (e *Error) Error() string {
+	return fmt.Sprintf("engine %s (%d): %s", e.Code, e.HTTPStatus, e.Message)
+}

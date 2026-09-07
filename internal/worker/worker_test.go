@@ -12,11 +12,11 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	ibengine "github.com/infbus/infbus/internal/engine"
-	"github.com/infbus/infbus/internal/relay"
-	"github.com/infbus/infbus/internal/testutil"
-	"github.com/infbus/infbus/internal/wire"
-	"github.com/infbus/infbus/internal/worker"
+	ibengine "github.com/laenenai/inferbus/internal/engine"
+	"github.com/laenenai/inferbus/internal/relay"
+	"github.com/laenenai/inferbus/internal/testutil"
+	"github.com/laenenai/inferbus/internal/wire"
+	"github.com/laenenai/inferbus/internal/worker"
 )
 
 func startWorker(t *testing.T, eng ibengine.Engine) (*nats.Conn, jetstream.JetStream) {

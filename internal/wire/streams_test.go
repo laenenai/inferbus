@@ -9,8 +9,8 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/infbus/infbus/internal/testutil"
-	"github.com/infbus/infbus/internal/wire"
+	"github.com/laenenai/inferbus/internal/testutil"
+	"github.com/laenenai/inferbus/internal/wire"
 )
 
 func TestEnsureStreamsIdempotent(t *testing.T) {

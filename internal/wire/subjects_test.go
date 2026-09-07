@@ -4,13 +4,13 @@ import "testing"
 
 func TestSlug(t *testing.T) {
 	cases := map[string]string{
-		"llama-70b":          "llama-70b",
-		"Qwen/Qwen2.5-7B":    "qwen-qwen2-5-7b",
-		"model with spaces":  "model-with-spaces",
-		"UPPER_case.v1":      "upper-case-v1",
-		"a__b":               "a-b",
-		"-model-":            "model",
-		"org//model":         "org-model",
+		"llama-70b":         "llama-70b",
+		"Qwen/Qwen2.5-7B":   "qwen-qwen2-5-7b",
+		"model with spaces": "model-with-spaces",
+		"UPPER_case.v1":     "upper-case-v1",
+		"a__b":              "a-b",
+		"-model-":           "model",
+		"org//model":        "org-model",
 	}
 	for in, want := range cases {
 		if got := Slug(in); got != want {

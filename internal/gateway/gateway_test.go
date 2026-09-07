@@ -13,11 +13,11 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	ibengine "github.com/infbus/infbus/internal/engine"
-	"github.com/infbus/infbus/internal/gateway"
-	"github.com/infbus/infbus/internal/testutil"
-	"github.com/infbus/infbus/internal/wire"
-	"github.com/infbus/infbus/internal/worker"
+	ibengine "github.com/laenenai/inferbus/internal/engine"
+	"github.com/laenenai/inferbus/internal/gateway"
+	"github.com/laenenai/inferbus/internal/testutil"
+	"github.com/laenenai/inferbus/internal/wire"
+	"github.com/laenenai/inferbus/internal/worker"
 )
 
 // startStack runs embedded NATS + a worker with a fake engine + the gateway
@@ -99,7 +99,9 @@ func TestModelsListsAllowedAliases(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var out struct {
-		Data []struct{ ID string `json:"id"` } `json:"data"`
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
@@ -145,7 +147,9 @@ func TestNonStreamEndToEnd(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	var out struct{ Object string `json:"object"` }
+	var out struct {
+		Object string `json:"object"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}

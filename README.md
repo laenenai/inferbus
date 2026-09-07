@@ -1,6 +1,6 @@
-# infbus
+# inferbus
 
-infbus is an open-source, OpenAI-compatible inference gateway built on
+inferbus is an open-source, OpenAI-compatible inference gateway built on
 [NATS](https://nats.io) JetStream. Clients speak the standard OpenAI HTTP API
 against a **gateway**, which resolves a caller's API key to an org/project and
 translates a caller-facing **alias** (e.g. `fast`) to a concrete backend model,
@@ -197,7 +197,7 @@ cancel.
 
 ```sh
 task test    # go test ./...
-task build   # go build -o infbus ./cmd/infbus
+task build   # go build -o inferbus ./cmd/inferbus
 task check   # go vet, go test -race, and a branding grep
 ```
 

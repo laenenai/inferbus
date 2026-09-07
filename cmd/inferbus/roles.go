@@ -14,12 +14,12 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/infbus/infbus/internal/engine"
-	"github.com/infbus/infbus/internal/engine/bifrostengine"
-	"github.com/infbus/infbus/internal/engine/openaihttp"
-	"github.com/infbus/infbus/internal/gateway"
-	"github.com/infbus/infbus/internal/wire"
-	"github.com/infbus/infbus/internal/worker"
+	"github.com/laenenai/inferbus/internal/engine"
+	"github.com/laenenai/inferbus/internal/engine/bifrostengine"
+	"github.com/laenenai/inferbus/internal/engine/openaihttp"
+	"github.com/laenenai/inferbus/internal/gateway"
+	"github.com/laenenai/inferbus/internal/wire"
+	"github.com/laenenai/inferbus/internal/worker"
 )
 
 // connect dials NATS for the given role ("gateway" or "worker"), wiring up
@@ -29,7 +29,7 @@ import (
 // frames, and disconnects/reconnects during the long-lived NATS session are
 // logged too.
 func connect(url, role string) (*nats.Conn, jetstream.JetStream, error) {
-	if env := os.Getenv("INFBUS_NATS_URL"); env != "" {
+	if env := os.Getenv("INFERBUS_NATS_URL"); env != "" {
 		url = env
 	}
 	if url == "" {
@@ -37,7 +37,7 @@ func connect(url, role string) (*nats.Conn, jetstream.JetStream, error) {
 	}
 	nc, err := nats.Connect(url,
 		nats.MaxReconnects(-1),
-		nats.Name("infbus-"+role),
+		nats.Name("inferbus-"+role),
 		nats.ErrorHandler(func(nc *nats.Conn, sub *nats.Subscription, err error) {
 			subject := ""
 			if sub != nil {
