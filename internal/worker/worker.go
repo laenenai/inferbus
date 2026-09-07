@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -30,14 +31,49 @@ func New(nc *nats.Conn, js jetstream.JetStream, engines map[string]ibengine.Engi
 
 func (w *Worker) Run(ctx context.Context) error { return w.RunReady(ctx, nil) }
 
-// RunReady closes ready once every consumer is pulling.
+// RunReady closes ready once every consumer is pulling. ready is only
+// closed on a fully successful startup: if any consumer fails to start,
+// RunReady stops every consumer that did start (so nothing leaks) and
+// returns the error without ever closing ready — callers must not rely on
+// ready alone and should observe the returned error too.
 func (w *Worker) RunReady(ctx context.Context, ready chan<- struct{}) error {
 	if err := wire.EnsureStreams(ctx, w.js); err != nil {
 		return err
 	}
-	var wg sync.WaitGroup
-	var consumers []jetstream.ConsumeContext
+	// Fail fast on a missing engine rather than panicking with a nil-map
+	// lookup deep inside handle() the first time a request for that model
+	// arrives.
 	for _, mc := range w.cfg.Models {
+		if w.engines[mc.Name] == nil {
+			return fmt.Errorf("worker: no engine registered for model %q", mc.Name)
+		}
+	}
+
+	var wg sync.WaitGroup
+	// Sentinel: keeps the counter >= 1 for the entire time consumers may be
+	// delivering messages, so wg.Wait() below can never observe a transient
+	// zero and race with a concurrent wg.Add(1) from the delivery goroutine
+	// (the classic "Add called concurrently with Wait" WaitGroup misuse).
+	// It is only released once every consumer's Closed() channel confirms
+	// its delivery goroutine has exited and can no longer call Add.
+	wg.Add(1)
+
+	var consumers []jetstream.ConsumeContext
+	var startErr error
+	defer func() {
+		// Only fires on a startup failure (see the early returns below);
+		// on a normal shutdown consumers are already stopped explicitly
+		// further down, so this is a harmless no-op there (Stop is
+		// idempotent).
+		if startErr != nil {
+			for _, cc := range consumers {
+				cc.Stop()
+			}
+		}
+	}()
+
+	for _, mc := range w.cfg.Models {
+		mc := mc
 		cons, err := w.js.CreateOrUpdateConsumer(ctx, wire.StreamInference, jetstream.ConsumerConfig{
 			Durable:       wire.Durable(mc.Name),
 			FilterSubject: wire.ReqSubject(mc.Name),
@@ -47,18 +83,15 @@ func (w *Worker) RunReady(ctx context.Context, ready chan<- struct{}) error {
 			MaxAckPending: mc.MaxInflight,
 		})
 		if err != nil {
-			return err
+			startErr = err
+			return startErr
 		}
-		mc := mc
 		cc, err := cons.Consume(func(msg jetstream.Msg) {
 			// wg.Add happens synchronously on the consumer's single delivery
-			// goroutine, BEFORE the handler goroutine is spawned, so it can
-			// never race with the wg.Wait() below (which only runs after we
-			// have confirmed, via cc.Closed(), that this delivery goroutine
-			// has exited and can no longer call Add). Actual per-model
-			// concurrency is bounded by MaxAckPending == mc.MaxInflight:
-			// JetStream will not push more than that many un-acked messages,
-			// and each handler acks only when it is fully done.
+			// goroutine, BEFORE the handler goroutine is spawned. Actual
+			// per-model concurrency is bounded by MaxAckPending ==
+			// mc.MaxInflight: JetStream will not push more than that many
+			// un-acked messages, and each handler acks only when fully done.
 			wg.Add(1)
 			go func(msg jetstream.Msg) {
 				defer wg.Done()
@@ -66,7 +99,8 @@ func (w *Worker) RunReady(ctx context.Context, ready chan<- struct{}) error {
 			}(msg)
 		})
 		if err != nil {
-			return err
+			startErr = err
+			return startErr
 		}
 		consumers = append(consumers, cc)
 	}
@@ -80,6 +114,7 @@ func (w *Worker) RunReady(ctx context.Context, ready chan<- struct{}) error {
 	for _, cc := range consumers {
 		<-cc.Closed()
 	}
+	wg.Done() // release the sentinel: no consumer can Add after this point
 	wg.Wait()
 	return ctx.Err()
 }
@@ -186,6 +221,16 @@ func (w *Worker) handle(ctx context.Context, mc ModelConfig, msg jetstream.Msg) 
 	case context.Cause(hctx) == canceled:
 		_ = msg.Ack() // canceled requests must never redeliver
 		w.meter(m, mc, usage, "canceled", "", true, ttft, dur, queueMS)
+	case errors.Is(context.Cause(hctx), context.DeadlineExceeded):
+		// Deadline fired mid-stream (phase 2) — same treatment as an
+		// explicit client cancel: no terminal frame, meter as canceled.
+		_ = msg.Ack()
+		w.meter(m, mc, usage, "canceled", "", true, ttft, dur, queueMS)
+	case errors.Is(context.Cause(hctx), context.Canceled):
+		// Worker Run ctx was canceled (graceful shutdown), not a client
+		// cancel or a deadline — don't report this as an engine error.
+		_ = msg.Ack()
+		w.meter(m, mc, usage, "canceled", "worker_shutdown", true, ttft, dur, queueMS)
 	default:
 		we := wire.WireError{Code: "worker_error", Message: err.Error(), HTTPStatus: 502}
 		var ee *ibengine.Error

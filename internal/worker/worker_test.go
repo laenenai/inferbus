@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,15 @@ import (
 
 func startWorker(t *testing.T, eng ibengine.Engine) (*nats.Conn, jetstream.JetStream) {
 	t.Helper()
+	nc, js, _ := startWorkerCancelable(t, eng)
+	return nc, js
+}
+
+// startWorkerCancelable is like startWorker but also returns the cancel
+// func for the worker's Run context, for tests that need to trigger a
+// graceful shutdown mid-request.
+func startWorkerCancelable(t *testing.T, eng ibengine.Engine) (*nats.Conn, jetstream.JetStream, context.CancelFunc) {
+	t.Helper()
 	nc, js := testutil.RunNATS(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -34,7 +44,7 @@ func startWorker(t *testing.T, eng ibengine.Engine) (*nats.Conn, jetstream.JetSt
 	case <-time.After(5 * time.Second):
 		t.Fatal("worker not ready")
 	}
-	return nc, js
+	return nc, js, cancel
 }
 
 func publishAndListen(t *testing.T, nc *nats.Conn, js jetstream.JetStream, reqID string, deadline time.Time) *relay.Listener {
@@ -166,5 +176,101 @@ func TestExpiredDeadlineDiscardedOnPickup(t *testing.T) {
 	}
 	if ev.Status != "canceled" || ev.PromptTokens != 0 {
 		t.Fatalf("usage event = %+v", ev)
+	}
+}
+
+func TestMidStreamDeadlineMetersCanceled(t *testing.T) {
+	// wire.HdrDeadline is round-tripped through relay.Publish/metaOf as
+	// RFC3339 text, which only has second precision: any sub-second offset
+	// gets floor-truncated and can land in the past by the time the worker
+	// picks the message up, tripping the phase-1 "expired on pickup" path
+	// instead of the phase-2 mid-stream path this test targets. Use a
+	// delay/deadline combination with enough margin (>1s of slack on both
+	// sides) to be immune to that truncation: deadline 3.5s out, chunks
+	// spaced 2s apart, so the effective (truncated) deadline of 2.5s-3.5s
+	// always lands strictly between chunk1 (t=2s) and chunk2 (t=4s).
+	eng := &testutil.FakeEngine{
+		Chunks:     []string{`{"c":0}`, `{"c":1}`, `{"c":2}`, `{"c":3}`, `{"c":4}`},
+		FinalUsage: wire.Usage{PromptTokens: 5, CompletionTokens: 5},
+		Delay:      2 * time.Second,
+	}
+	nc, js := startWorker(t, eng)
+
+	sub, err := nc.SubscribeSync("metering.usage.>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	_ = publishAndListen(t, nc, js, "req-deadline", time.Now().Add(3500*time.Millisecond))
+
+	raw, err := sub.NextMsg(10 * time.Second)
+	if err != nil {
+		t.Fatal("no usage event after mid-stream deadline expiry")
+	}
+	var ev wire.UsageEvent
+	if err := json.Unmarshal(raw.Data, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Status != "canceled" || !ev.Estimated || ev.ErrorCode != "" {
+		t.Fatalf("usage event = %+v", ev)
+	}
+}
+
+func TestShutdownMetersWorkerShutdown(t *testing.T) {
+	eng := &testutil.FakeEngine{
+		Chunks:     []string{`{"c":0}`, `{"c":1}`, `{"c":2}`, `{"c":3}`, `{"c":4}`},
+		FinalUsage: wire.Usage{PromptTokens: 5, CompletionTokens: 5},
+		Delay:      150 * time.Millisecond,
+	}
+	nc, js, cancelWorker := startWorkerCancelable(t, eng)
+
+	sub, err := nc.SubscribeSync("metering.usage.>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	l := publishAndListen(t, nc, js, "req-shutdown", time.Now().Add(time.Minute))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := l.Next(ctx); err != nil { // wait for first chunk = generation started
+		t.Fatal(err)
+	}
+
+	cancelWorker() // simulate graceful worker shutdown mid-stream
+
+	raw, err := sub.NextMsg(10 * time.Second)
+	if err != nil {
+		t.Fatal("no usage event after worker shutdown")
+	}
+	var ev wire.UsageEvent
+	if err := json.Unmarshal(raw.Data, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Status != "canceled" || ev.ErrorCode != "worker_shutdown" {
+		t.Fatalf("usage event = %+v", ev)
+	}
+}
+
+func TestMissingEngineFailsFast(t *testing.T) {
+	nc, js := testutil.RunNATS(t)
+	w := worker.New(nc, js, map[string]ibengine.Engine{}, worker.Config{
+		WorkerID: "w-test",
+		Models:   []worker.ModelConfig{{Name: "ghost", MaxInflight: 2}},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.RunReady(ctx, nil) }()
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "ghost") {
+			t.Fatalf("err = %v, want an error mentioning %q", err, "ghost")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunReady did not return promptly for a missing engine")
 	}
 }
