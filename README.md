@@ -232,7 +232,7 @@ on every push and pull request.
 
 | Milestone | Scope |
 |---|---|
-| **M3** | Control plane: orgs/projects/keys/aliases with an admin API, NATS KV alias projection watched live by gateways, OIDC on admin routes |
+| **M3** | Control plane: event-sourced on [es-lite](https://github.com/laenenai/es-lite) with orgs/projects/keys/aliases, admin API, NATS KV projections watched live by gateways, OIDC — see [docs/design-controlplane.md](docs/design-controlplane.md) |
 | **M4** | Usage pipeline: `harvester` consuming `METERING` into ClickHouse; budget enforcement reads |
 | **M5** | Hardening: admission control from queue depth, request logging/metrics, docs |
 | **v1.5** | Priority tiers, claim-check for large payloads |
