@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,14 +22,36 @@ import (
 	"github.com/infbus/infbus/internal/worker"
 )
 
-func connect(url string) (*nats.Conn, jetstream.JetStream, error) {
+// connect dials NATS for the given role ("gateway" or "worker"), wiring up
+// handlers so connection trouble is observable instead of silent: a slow
+// consumer or a dropped subscription (see internal/relay.Listen's 256-frame
+// buffer) shows up in logs via ErrorHandler rather than just quietly losing
+// frames, and disconnects/reconnects during the long-lived NATS session are
+// logged too.
+func connect(url, role string) (*nats.Conn, jetstream.JetStream, error) {
 	if env := os.Getenv("INFBUS_NATS_URL"); env != "" {
 		url = env
 	}
 	if url == "" {
 		url = nats.DefaultURL
 	}
-	nc, err := nats.Connect(url, nats.MaxReconnects(-1))
+	nc, err := nats.Connect(url,
+		nats.MaxReconnects(-1),
+		nats.Name("infbus-"+role),
+		nats.ErrorHandler(func(nc *nats.Conn, sub *nats.Subscription, err error) {
+			subject := ""
+			if sub != nil {
+				subject = sub.Subject
+			}
+			slog.Error("nats error", "role", role, "subject", subject, "err", err)
+		}),
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			slog.Warn("nats disconnected", "role", role, "err", err)
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			slog.Info("nats reconnected", "role", role, "url", nc.ConnectedUrl())
+		}),
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -61,7 +84,7 @@ func runGateway(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, "gateway:", err)
 		return 1
 	}
-	nc, js, err := connect("")
+	nc, js, err := connect("", "gateway")
 	if err != nil {
 		fmt.Fprintln(stdout, "gateway: nats:", err)
 		return 1
@@ -100,7 +123,7 @@ func runWorker(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, "worker:", err)
 		return 1
 	}
-	nc, js, err := connect(cfg.NATSURL)
+	nc, js, err := connect(cfg.NATSURL, "worker")
 	if err != nil {
 		fmt.Fprintln(stdout, "worker: nats:", err)
 		return 1

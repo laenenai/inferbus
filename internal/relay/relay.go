@@ -63,6 +63,15 @@ type Listener struct {
 // Listen subscribes to the response subject. Call BEFORE Publish so no
 // frame can be lost between publish and subscribe.
 func Listen(nc *nats.Conn, reqID string) (*Listener, error) {
+	// 256 is this request's frame budget: core NATS delivers into this
+	// channel as fast as the worker publishes, and ChanSubscribe drops
+	// messages once the channel is full (the "slow consumer" case) rather
+	// than blocking the NATS client's dispatch loop. A slow-consumer drop
+	// surfaces to the caller as a frame-gap error in Next below (m.Seq !=
+	// l.next), not silently — but it does mean an unusually bursty/slow
+	// reader on a very chatty stream could still lose frames if it falls
+	// more than 256 frames behind. See cmd/infbus/roles.go's
+	// nats.ErrorHandler for the connection-level slow-consumer signal.
 	ch := make(chan *nats.Msg, 256)
 	sub, err := nc.ChanSubscribe(wire.RespSubject(reqID), ch)
 	if err != nil {

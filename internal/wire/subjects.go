@@ -15,7 +15,7 @@ const (
 	HdrReqID    = "Ib-Req-Id"
 	HdrKind     = "Ib-Kind"
 	HdrReply    = "Ib-Reply"
-	HdrDeadline = "Ib-Deadline" // RFC3339
+	HdrDeadline = "Ib-Deadline" // RFC3339Nano
 	HdrWorkerID = "Ib-Worker-Id"
 )
 
@@ -44,5 +44,5 @@ func CancelSubject(reqID string) string { return "inference.cancel." + reqID }
 func Durable(model string) string       { return "model-" + Slug(model) }
 
 func UsageSubject(org, project, model string) string {
-	return "metering.usage." + org + "." + project + "." + Slug(model)
+	return "metering.usage." + Slug(org) + "." + Slug(project) + "." + Slug(model)
 }

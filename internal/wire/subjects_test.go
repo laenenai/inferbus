@@ -32,6 +32,13 @@ func TestSubjects(t *testing.T) {
 	if got := UsageSubject("acme", "prod", "llama-70b"); got != "metering.usage.acme.prod.llama-70b" {
 		t.Errorf("UsageSubject = %q", got)
 	}
+	// org/project are slugged too: an org or project name containing "."
+	// would otherwise inject extra NATS subject tokens (subjects are
+	// dot-delimited), letting a caller-controlled name corrupt the
+	// metering.usage.<org>.<project>.<model> hierarchy.
+	if got := UsageSubject("Acme Corp.", "prod/eu", "llama-70b"); got != "metering.usage.acme-corp.prod-eu.llama-70b" {
+		t.Errorf("UsageSubject with unslugged org/project = %q", got)
+	}
 	if got := Durable("llama-70b"); got != "model-llama-70b" {
 		t.Errorf("Durable = %q", got)
 	}
