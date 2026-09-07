@@ -4,9 +4,9 @@ package controlplane
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"math/big"
+
+	"github.com/laenenai/inferbus/internal/cpkv"
 )
 
 // keyPrefix marks a plaintext API key as live-issued by this control plane.
@@ -38,13 +38,10 @@ func GenerateKey() (plaintext, hashHex string) {
 	return plaintext, hashHex
 }
 
-// HashKey returns the lowercase hex-encoded SHA-256 hash of plaintext. This
-// is the form persisted in events and state (ApiKey.hash); the plaintext
-// itself must never be stored.
-func HashKey(plaintext string) string {
-	sum := sha256.Sum256([]byte(plaintext))
-	return hex.EncodeToString(sum[:])
-}
+// HashKey re-exports cpkv.HashKey (I5 ruling: the hashing scheme lives in
+// internal/cpkv now, shared with the gateway). See cpkv.HashKey's doc
+// comment for the algorithm.
+func HashKey(plaintext string) string { return cpkv.HashKey(plaintext) }
 
 // base62KeyLen is the rendered length of 32 random bytes in base62: 256 bits
 // / log2(62) rounds up to 43 digits.

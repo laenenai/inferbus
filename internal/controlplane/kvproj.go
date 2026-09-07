@@ -35,6 +35,7 @@ import (
 	controlplanev1 "github.com/laenenai/inferbus/api/controlplane/v1"
 	"github.com/laenenai/inferbus/internal/controlplane/alias"
 	"github.com/laenenai/inferbus/internal/controlplane/apikey"
+	"github.com/laenenai/inferbus/internal/cpkv"
 
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -43,10 +44,13 @@ import (
 	"github.com/laenenai/es-lite/projection"
 )
 
-// Bucket and durable/marker names for the two KV projectors.
+// BucketAliases and BucketKeys re-export cpkv's bucket names (I5 ruling:
+// the schema lives in internal/cpkv now, shared with the gateway; this
+// package keeps its own exported names as aliases so no existing caller
+// or test needs to change).
 const (
-	BucketAliases = "ALIASES"
-	BucketKeys    = "KEYS"
+	BucketAliases = cpkv.BucketAliases
+	BucketKeys    = cpkv.BucketKeys
 
 	// bucketMarkers holds every projector's Marker position, keyed by
 	// projection name. Using a KV bucket (rather than Postgres) keeps the
@@ -71,28 +75,12 @@ const (
 	replayBatchSize = 100
 )
 
-// AliasEntry is the ALIASES bucket's value schema (JSON), stored under key
-// "<scope>/<name>".
-type AliasEntry struct {
-	Target string            `json:"target"`
-	Params map[string]string `json:"params,omitempty"`
-}
-
-// KeyEntry is the KEYS bucket's value schema (JSON), stored under key =
-// the API key's current hash hex.
-type KeyEntry struct {
-	Org          string   `json:"org"`
-	Project      string   `json:"project"`
-	Name         string   `json:"name"`
-	Allow        []string `json:"allow,omitempty"`
-	RateLimitRPM int      `json:"rate_limit_rpm,omitempty"`
-
-	// Disabled is reserved: today KeyDisabled deletes the entry entirely
-	// (spec §4 "KeyDisabled -> Delete current_hash") rather than flagging
-	// it, so this field is always false in the current projector. It is
-	// kept in the schema for a possible future soft-disable read model.
-	Disabled bool `json:"disabled,omitempty"`
-}
+// AliasEntry and KeyEntry re-export cpkv's value schemas (I5 ruling — see
+// BucketAliases/BucketKeys above for why).
+type (
+	AliasEntry = cpkv.AliasEntry
+	KeyEntry   = cpkv.KeyEntry
+)
 
 // Marker persists a read model's highest-applied GlobalPosition. Its shape
 // matches projection.Marker (api-notes) exactly, so any controlplane.Marker

@@ -87,6 +87,22 @@ func runGateway(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, "gateway:", err)
 		return 1
 	}
+	// I3 review ruling: a non-empty static `keys:` list alongside
+	// `iam.mode: kv` is a hard startup error, not a silently-ignored
+	// leftover — kv mode never consults cfg.Keys at all (KVIAM is the sole
+	// source of truth), so a config with both looks like the operator
+	// believes those static keys still work when they never will. Fail
+	// loudly and fast (before ever touching NATS) instead of an auth
+	// surface that silently downgrades to "kv only" without the operator
+	// noticing.
+	if cfg.IAM.Mode == "kv" && len(cfg.Keys) > 0 {
+		fmt.Fprintln(stdout, "gateway: iam.mode is \"kv\" but config also lists static keys: — remove the keys: list (kv mode never uses it) or switch iam.mode to \"static\"")
+		return 1
+	}
+	if cfg.IAM.Mode != "kv" && cfg.IAM.Mode != "static" {
+		fmt.Fprintf(stdout, "gateway: unknown iam.mode %q\n", cfg.IAM.Mode)
+		return 1
+	}
 	nc, js, err := connect("", "gateway")
 	if err != nil {
 		fmt.Fprintln(stdout, "gateway: nats:", err)
@@ -102,22 +118,20 @@ func runGateway(args []string, stdout io.Writer) int {
 	var g *gateway.Gateway
 	switch cfg.IAM.Mode {
 	case "kv":
-		// NewKVIAM blocks (with backoff) until the control plane's
-		// ALIASES/KEYS KV buckets exist — see kviam.go's binding ruling
-		// #2 doc comment. It only returns an error if ctx is canceled
-		// first (e.g. SIGTERM during startup), never on a merely-missing
-		// bucket.
+		// NewKVIAM starts its watch loops in the background and returns
+		// immediately (review ruling I6) — it does not wait for the
+		// control plane's ALIASES/KEYS buckets to exist. The HTTP server
+		// below starts right away too; GET /readyz (and a 503 from
+		// /v1/models, /v1/chat/completions) reports "not ready yet" until
+		// KVIAM's first scan of both buckets completes.
 		kv, err := gateway.NewKVIAM(ctx, js)
 		if err != nil {
 			fmt.Fprintln(stdout, "gateway: kv iam:", err)
 			return 1
 		}
 		g = gateway.NewWithIAM(nc, js, cfg, kv)
-	case "static", "":
+	default: // "static" — LoadConfig already defaults empty Mode to this.
 		g = gateway.New(nc, js, cfg)
-	default:
-		fmt.Fprintf(stdout, "gateway: unknown iam.mode %q\n", cfg.IAM.Mode)
-		return 1
 	}
 	srv := &http.Server{Addr: cfg.Addr, Handler: g.Routes()}
 	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()

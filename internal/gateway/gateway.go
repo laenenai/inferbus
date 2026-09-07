@@ -57,7 +57,64 @@ func (g *Gateway) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/chat/completions", g.chatCompletions)
 	mux.HandleFunc("GET /v1/models", g.models)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /readyz", g.readyz)
 	return mux
+}
+
+// readinessChecker is satisfied by an iamProvider that has a startup
+// window during which it isn't yet safe to serve requests — currently
+// only *KVIAM (review ruling I6: NewKVIAM returns immediately rather than
+// blocking, so there is a real gap between "gateway process started" and
+// "KVIAM has a real snapshot of the KEYS/ALIASES buckets"). staticIAM
+// does not implement this interface at all, so isReady()'s type
+// assertion simply fails for it and the gateway is always considered
+// ready in static mode — there is no startup window to speak of, the
+// static config is already fully loaded by the time Gateway exists.
+type readinessChecker interface {
+	Ready() <-chan struct{}
+}
+
+// isReady reports whether g.iam is either not a readinessChecker at all
+// (static mode) or has completed its startup Ready() signal (kv mode,
+// once both buckets have their first snapshot).
+func (g *Gateway) isReady() bool {
+	rc, ok := g.iam.(readinessChecker)
+	if !ok {
+		return true
+	}
+	select {
+	case <-rc.Ready():
+		return true
+	default:
+		return false
+	}
+}
+
+// readyz backs GET /readyz: 200 once the gateway is able to make real
+// auth/allowlist decisions, 503 while a kv-mode KVIAM is still doing its
+// first scan of the KEYS/ALIASES buckets (review ruling I6).
+func (g *Gateway) readyz(w http.ResponseWriter, _ *http.Request) {
+	if g.isReady() {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "OK")
+		return
+	}
+	w.WriteHeader(http.StatusServiceUnavailable)
+	fmt.Fprint(w, "unhealthy: kv iam not ready")
+}
+
+// checkReady writes a 503 and returns false if the gateway can't yet make
+// a real auth decision (review ruling I6) — callers that authenticate
+// (models, chatCompletions) must check this first, since answering 401 to
+// every request during a kv-mode startup window would look identical to
+// "every key was revoked" from the caller's side, which is a much worse
+// failure mode than a transient 503.
+func (g *Gateway) checkReady(w http.ResponseWriter) bool {
+	if g.isReady() {
+		return true
+	}
+	oaiError(w, http.StatusServiceUnavailable, "service_unavailable", "gateway is still loading key/alias state, try again shortly")
+	return false
 }
 
 func oaiError(w http.ResponseWriter, status int, typ, msg string) {
@@ -78,6 +135,9 @@ func (g *Gateway) authenticate(r *http.Request) (KeyConfig, bool) {
 }
 
 func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
+	if !g.checkReady(w) {
+		return
+	}
 	key, ok := g.authenticate(r)
 	if !ok {
 		oaiError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
@@ -107,6 +167,9 @@ func newReqID() string {
 }
 
 func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	if !g.checkReady(w) {
+		return
+	}
 	key, ok := g.authenticate(r)
 	if !ok {
 		oaiError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")

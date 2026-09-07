@@ -366,3 +366,88 @@ func TestClientDisconnectCancels(t *testing.T) {
 		t.Fatalf("usage.Estimated = %v, want true", usage.Estimated)
 	}
 }
+
+// TestStaticModeReadyzAlwaysOK covers review ruling I6's other half:
+// static mode has no startup window at all (the config is already fully
+// loaded by the time Gateway exists), so /readyz must always be 200 —
+// staticIAM doesn't implement the readinessChecker interface gateway.go
+// checks, so isReady()'s type assertion simply fails and readiness is
+// unconditional.
+func TestStaticModeReadyzAlwaysOK(t *testing.T) {
+	srv, _ := startStack(t, &testutil.FakeEngine{})
+	resp, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /readyz status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestKVModeUnready503 covers review ruling I6's main requirement: a
+// gateway in kv mode whose KVIAM has not yet completed its first scan
+// (Ready() not closed) must answer /readyz, /v1/models, and
+// /v1/chat/completions all with 503 — never silently treating "haven't
+// scanned yet" as "every key was revoked" (401) or serving stale/empty
+// state as if it were authoritative.
+//
+// It constructs a KVIAM against a JetStream with neither the KEYS nor
+// ALIASES bucket ever created, so Ready() deterministically never closes
+// for the lifetime of the test — no race with a real scan completing.
+func TestKVModeUnready503(t *testing.T) {
+	_, js := testutil.RunNATS(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	kv, err := gateway.NewKVIAM(ctx, js)
+	if err != nil {
+		t.Fatalf("NewKVIAM: %v", err)
+	}
+	select {
+	case <-kv.Ready():
+		t.Fatal("KVIAM reported ready with no buckets ever created")
+	default:
+	}
+
+	g := gateway.NewWithIAM(nil, js, gateway.Config{IAM: gateway.IAMConfig{Mode: "kv"}}, kv)
+	srv := httptest.NewServer(g.Routes())
+	t.Cleanup(srv.Close)
+
+	assert503 := func(t *testing.T, method, path, body string) {
+		t.Helper()
+		req, err := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer whatever")
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("%s %s status = %d, want 503", method, path, resp.StatusCode)
+		}
+		if path == "/readyz" {
+			return
+		}
+		var out struct {
+			Error struct {
+				Type string `json:"type"`
+			} `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if out.Error.Type != "service_unavailable" {
+			t.Fatalf("error.type = %q, want service_unavailable", out.Error.Type)
+		}
+	}
+
+	assert503(t, http.MethodGet, "/readyz", "")
+	assert503(t, http.MethodGet, "/v1/models", "not-empty-to-trigger-header")
+	assert503(t, http.MethodPost, "/v1/chat/completions", `{"model":"fast","messages":[]}`)
+}

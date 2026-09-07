@@ -1,11 +1,25 @@
 package gateway_test
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/laenenai/inferbus/internal/gateway"
 )
+
+// writeConfig writes contents to a temp file and returns its path — used
+// by the IAM-mode parsing tests below, which each need a small,
+// purpose-built config rather than the checked-in example file.
+func writeConfig(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gateway.yaml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
 
 // TestExampleConfigParses is a golden test against the checked-in
 // deploy/gateway.example.yaml: it must always parse, and its documented
@@ -36,5 +50,38 @@ func TestExampleConfigParses(t *testing.T) {
 	}
 	if got, want := cfg.Aliases["fast"], "llama3.2"; got != want {
 		t.Errorf("Aliases[fast] = %q, want %q", got, want)
+	}
+	if cfg.IAM.Mode != "static" {
+		t.Errorf("IAM.Mode = %q, want %q (default, no iam: block in the example)", cfg.IAM.Mode, "static")
+	}
+}
+
+// TestConfigDefaultsToStaticIAM covers I3's config-parsing requirement: a
+// config with no iam: block at all (not just the checked-in example)
+// still defaults Mode to "static" — the only mode M2 ever had, and the
+// only one that keeps working with zero config changes.
+func TestConfigDefaultsToStaticIAM(t *testing.T) {
+	path := writeConfig(t, "keys:\n  - key: k1\n    name: n1\n    allow: [fast]\naliases:\n  fast: m1\n")
+	cfg, err := gateway.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.IAM.Mode != "static" {
+		t.Errorf("IAM.Mode = %q, want %q", cfg.IAM.Mode, "static")
+	}
+}
+
+// TestConfigParsesExplicitKVMode covers I3's other required case: an
+// explicit `iam: {mode: kv}` block parses to Mode "kv" (and is not
+// silently overwritten by LoadConfig's static default, which only fires
+// when Mode is the empty string).
+func TestConfigParsesExplicitKVMode(t *testing.T) {
+	path := writeConfig(t, "iam:\n  mode: kv\n")
+	cfg, err := gateway.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.IAM.Mode != "kv" {
+		t.Errorf("IAM.Mode = %q, want %q", cfg.IAM.Mode, "kv")
 	}
 }

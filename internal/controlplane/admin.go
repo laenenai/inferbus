@@ -44,6 +44,7 @@ import (
 	"github.com/laenenai/inferbus/internal/controlplane/alias"
 	"github.com/laenenai/inferbus/internal/controlplane/apikey"
 	"github.com/laenenai/inferbus/internal/controlplane/org"
+	"github.com/laenenai/inferbus/internal/cpkv"
 	"github.com/laenenai/inferbus/internal/wire"
 
 	"github.com/google/uuid"
@@ -54,7 +55,9 @@ import (
 
 // globalScope is the HTTP alias-scope segment that maps onto the alias
 // aggregate's "g_<name>" stream-id encoding (binding controller ruling 1).
-const globalScope = "_global"
+// Re-exports cpkv.GlobalScope (I5 ruling) under admin.go's own established
+// name so every existing reference here is unchanged.
+const globalScope = cpkv.GlobalScope
 
 // OrgRuntime, KeyRuntime, and AliasRuntime name the three
 // aggregate.Runtime instantiations NewAdmin and the runner share, so

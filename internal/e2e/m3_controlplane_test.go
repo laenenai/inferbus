@@ -46,6 +46,7 @@ import (
 	"github.com/laenenai/inferbus/internal/controlplane/alias"
 	"github.com/laenenai/inferbus/internal/controlplane/apikey"
 	"github.com/laenenai/inferbus/internal/controlplane/org"
+	"github.com/laenenai/inferbus/internal/cpkv"
 	ibengine "github.com/laenenai/inferbus/internal/engine"
 	"github.com/laenenai/inferbus/internal/gateway"
 	"github.com/laenenai/inferbus/internal/testutil"
@@ -246,9 +247,9 @@ func TestM3FullLoop(t *testing.T) {
 
 	// --- wait for KV projection: bounded poll against the real buckets ----
 
-	keyHash := controlplane.HashKey(keyResp.Key)
+	keyHash := cpkv.HashKey(keyResp.Key)
 	pollUntil(t, 10*time.Second, func() bool {
-		kv, err := cp.js.KeyValue(context.Background(), controlplane.BucketKeys)
+		kv, err := cp.js.KeyValue(context.Background(), cpkv.BucketKeys)
 		if err != nil {
 			return false
 		}
@@ -256,7 +257,7 @@ func TestM3FullLoop(t *testing.T) {
 		return err == nil
 	})
 	pollUntil(t, 10*time.Second, func() bool {
-		kv, err := cp.js.KeyValue(context.Background(), controlplane.BucketAliases)
+		kv, err := cp.js.KeyValue(context.Background(), cpkv.BucketAliases)
 		if err != nil {
 			return false
 		}
@@ -278,6 +279,20 @@ func TestM3FullLoop(t *testing.T) {
 	}, kviam)
 	gwSrv := httptest.NewServer(gw.Routes())
 	t.Cleanup(gwSrv.Close)
+
+	// Review ruling I6: NewKVIAM no longer blocks — it starts its watch
+	// loops and returns immediately, so the gateway can bind and start
+	// serving /readyz right away even before KVIAM has a real snapshot.
+	// This test cares about a successful chat completion, which needs a
+	// real snapshot, so wait for Ready() explicitly (unit coverage for
+	// the pre-ready 503 window itself lives in
+	// internal/gateway/kviam_test.go /
+	// gateway_test.go rather than being re-proven here).
+	select {
+	case <-kviam.Ready():
+	case <-time.After(10 * time.Second):
+		t.Fatal("KVIAM did not become ready")
+	}
 
 	fakeEngine := &testutil.FakeEngine{
 		Chunks:     []string{`{"choices":[{"delta":{"content":"hi"}}]}`},
@@ -331,17 +346,49 @@ func TestM3FullLoop(t *testing.T) {
 		resp.Body.Close()
 		t.Fatalf("content-type = %q, want text/event-stream", ct)
 	}
-	var sawDone bool
+	// Review ruling I4: don't just check that a [DONE] eventually shows up
+	// — assert the stream actually carries the FakeEngine's own delta
+	// content through end to end (the gateway didn't just relay something,
+	// it relayed the RIGHT thing), and that no SSE "error" event snuck in
+	// ahead of [DONE] (which would mean the request technically "completed"
+	// but the worker/engine hit a failure mid-stream — see gateway.go's
+	// streamOut, which emits such an event on a mid-stream RemoteError).
+	var (
+		sawDone      bool
+		sawContent   bool
+		sawErrorLine string
+	)
 	sc := bufio.NewScanner(resp.Body)
 	for sc.Scan() {
-		if strings.TrimPrefix(sc.Text(), "data: ") == "[DONE]" {
+		line := strings.TrimPrefix(sc.Text(), "data: ")
+		if line == "" {
+			continue
+		}
+		if line == "[DONE]" {
 			sawDone = true
 			break
+		}
+		if strings.Contains(line, `"content":"hi"`) {
+			sawContent = true
+		}
+		var maybeErr struct {
+			Error *struct {
+				Type string `json:"type"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &maybeErr); err == nil && maybeErr.Error != nil {
+			sawErrorLine = line
 		}
 	}
 	resp.Body.Close()
 	if !sawDone {
 		t.Fatal("stream never emitted [DONE]")
+	}
+	if sawErrorLine != "" {
+		t.Fatalf("stream carried an SSE error event before [DONE]: %s", sawErrorLine)
+	}
+	if !sawContent {
+		t.Fatal(`stream never carried the FakeEngine's delta content ("content":"hi")`)
 	}
 
 	// --- disable the key via admin, wait for the KV projection of the ------
@@ -350,7 +397,7 @@ func TestM3FullLoop(t *testing.T) {
 	adminRequest(t, cp.adminSrv, bootstrapToken, http.MethodPost, "/admin/v1/keys/"+keyResp.ID+"/disable", nil, nil)
 
 	pollUntil(t, 10*time.Second, func() bool {
-		kv, err := cp.js.KeyValue(context.Background(), controlplane.BucketKeys)
+		kv, err := cp.js.KeyValue(context.Background(), cpkv.BucketKeys)
 		if err != nil {
 			return false
 		}
