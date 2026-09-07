@@ -49,6 +49,89 @@ func (m *memMarker) Save(_ context.Context, name string, pos uint64) error {
 	return nil
 }
 
+// TestPgReadStore_ProjectPK_OrgScoped is finding C1: cp_projects used to be
+// keyed by id alone, so two different orgs could never both own a project
+// id "default" — the second UpsertProject would silently steal the row
+// out from under the first org (ON CONFLICT (id) rewrote its org/name/
+// archived columns in place). This test proves both survive independently
+// against a real Postgres database, and that archiving one org's project
+// leaves the other org's same-id project completely untouched.
+func TestPgReadStore_ProjectPK_OrgScoped(t *testing.T) {
+	dsn := os.Getenv("CP_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("CP_TEST_PG_DSN not set; skipping Postgres cp_projects org-scoping test")
+	}
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	rs, err := NewPgReadStore(pool)
+	if err != nil {
+		t.Fatalf("NewPgReadStore: %v", err)
+	}
+
+	orgA := "pg-pk-org-a-" + t.Name()
+	orgB := "pg-pk-org-b-" + t.Name()
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM cp_projects WHERE org IN ($1, $2)`, orgA, orgB)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM cp_orgs WHERE id IN ($1, $2)`, orgA, orgB)
+	})
+
+	if err := rs.UpsertOrg(ctx, OrgRow{ID: orgA, Name: "Org A"}); err != nil {
+		t.Fatalf("UpsertOrg org A: %v", err)
+	}
+	if err := rs.UpsertOrg(ctx, OrgRow{ID: orgB, Name: "Org B"}); err != nil {
+		t.Fatalf("UpsertOrg org B: %v", err)
+	}
+
+	// Both orgs own a project with the SAME id "default".
+	if err := rs.UpsertProject(ctx, ProjectRow{ID: "default", Org: orgA, Name: "Org A Default"}); err != nil {
+		t.Fatalf("UpsertProject org A/default: %v", err)
+	}
+	if err := rs.UpsertProject(ctx, ProjectRow{ID: "default", Org: orgB, Name: "Org B Default"}); err != nil {
+		t.Fatalf("UpsertProject org B/default: %v", err)
+	}
+
+	_, _, projA, err := rs.GetOrg(ctx, orgA)
+	if err != nil {
+		t.Fatalf("GetOrg org A: %v", err)
+	}
+	if want := []ProjectRow{{ID: "default", Org: orgA, Name: "Org A Default"}}; !reflect.DeepEqual(projA, want) {
+		t.Fatalf("org A projects = %+v, want %+v (must survive org B's same-id project)", projA, want)
+	}
+
+	_, _, projB, err := rs.GetOrg(ctx, orgB)
+	if err != nil {
+		t.Fatalf("GetOrg org B: %v", err)
+	}
+	if want := []ProjectRow{{ID: "default", Org: orgB, Name: "Org B Default"}}; !reflect.DeepEqual(projB, want) {
+		t.Fatalf("org B projects = %+v, want %+v (must survive org A's same-id project)", projB, want)
+	}
+
+	// Archiving org A's "default" must not touch org B's "default".
+	if err := rs.UpsertProject(ctx, ProjectRow{ID: "default", Org: orgA, Name: "Org A Default", Archived: true}); err != nil {
+		t.Fatalf("archive org A/default: %v", err)
+	}
+	_, _, projA, err = rs.GetOrg(ctx, orgA)
+	if err != nil {
+		t.Fatalf("GetOrg org A after archive: %v", err)
+	}
+	if len(projA) != 1 || !projA[0].Archived {
+		t.Fatalf("org A projects after archive = %+v, want exactly one Archived=true row", projA)
+	}
+	_, _, projB, err = rs.GetOrg(ctx, orgB)
+	if err != nil {
+		t.Fatalf("GetOrg org B after org A's archive: %v", err)
+	}
+	if len(projB) != 1 || projB[0].Archived {
+		t.Fatalf("org B projects after org A's archive = %+v, want exactly one Archived=false row (untouched)", projB)
+	}
+}
+
 // --- Step 1: handler-level table test against NewMemReadStore -------------
 
 // TestSQLProjector_Handler_Lifecycle feeds a scripted envelope sequence
@@ -387,6 +470,69 @@ func TestRunSQLProjector_Integration(t *testing.T) {
 	}
 	if len(keys) != 1 || keys[0].ID != "key-1" || keys[0].RateLimitRPM != 30 {
 		t.Fatalf("keys via live NATS delivery = %+v, want one key-1 row with RateLimitRPM=30", keys)
+	}
+}
+
+// TestMemReadStore_ProjectPK_OrgScoped pins finding C1's semantics without
+// Postgres: two different orgs each own a project with the SAME id
+// ("default"). Both rows must survive independently, and archiving the
+// project in one org must not touch the other org's project of the same
+// id. MemReadStore already scopes cp_projects by org internally (map[org
+// id]map[project id]ProjectRow), so this test's job is to pin that
+// behavior as a binding contract of the ReadStore interface — not just an
+// implementation detail — so a future refactor can't accidentally flatten
+// it back to a single global project-id keyspace.
+func TestMemReadStore_ProjectPK_OrgScoped(t *testing.T) {
+	ctx := context.Background()
+	rs := NewMemReadStore()
+
+	if err := rs.UpsertOrg(ctx, OrgRow{ID: "org-a", Name: "Org A"}); err != nil {
+		t.Fatalf("UpsertOrg org-a: %v", err)
+	}
+	if err := rs.UpsertOrg(ctx, OrgRow{ID: "org-b", Name: "Org B"}); err != nil {
+		t.Fatalf("UpsertOrg org-b: %v", err)
+	}
+	if err := rs.UpsertProject(ctx, ProjectRow{ID: "default", Org: "org-a", Name: "Org A Default"}); err != nil {
+		t.Fatalf("UpsertProject org-a/default: %v", err)
+	}
+	if err := rs.UpsertProject(ctx, ProjectRow{ID: "default", Org: "org-b", Name: "Org B Default"}); err != nil {
+		t.Fatalf("UpsertProject org-b/default: %v", err)
+	}
+
+	_, _, projA, err := rs.GetOrg(ctx, "org-a")
+	if err != nil {
+		t.Fatalf("GetOrg org-a: %v", err)
+	}
+	if want := []ProjectRow{{ID: "default", Org: "org-a", Name: "Org A Default"}}; !reflect.DeepEqual(projA, want) {
+		t.Fatalf("org-a projects = %+v, want %+v", projA, want)
+	}
+
+	_, _, projB, err := rs.GetOrg(ctx, "org-b")
+	if err != nil {
+		t.Fatalf("GetOrg org-b: %v", err)
+	}
+	if want := []ProjectRow{{ID: "default", Org: "org-b", Name: "Org B Default"}}; !reflect.DeepEqual(projB, want) {
+		t.Fatalf("org-b projects = %+v, want %+v", projB, want)
+	}
+
+	// Archive org-a's "default" project: org-b's same-id project must be
+	// completely untouched.
+	if err := rs.UpsertProject(ctx, ProjectRow{ID: "default", Org: "org-a", Name: "Org A Default", Archived: true}); err != nil {
+		t.Fatalf("archive org-a/default: %v", err)
+	}
+	_, _, projA, err = rs.GetOrg(ctx, "org-a")
+	if err != nil {
+		t.Fatalf("GetOrg org-a after archive: %v", err)
+	}
+	if len(projA) != 1 || !projA[0].Archived {
+		t.Fatalf("org-a projects after archive = %+v, want exactly one Archived=true row", projA)
+	}
+	_, _, projB, err = rs.GetOrg(ctx, "org-b")
+	if err != nil {
+		t.Fatalf("GetOrg org-b after org-a's archive: %v", err)
+	}
+	if len(projB) != 1 || projB[0].Archived {
+		t.Fatalf("org-b projects after org-a's archive = %+v, want exactly one Archived=false row (untouched)", projB)
 	}
 }
 

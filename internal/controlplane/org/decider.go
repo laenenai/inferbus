@@ -90,9 +90,19 @@ var Decider = es.Decider[*controlplanev1.Org, *controlplanev1.OrgCommand, *contr
 			if !validRoles[role] {
 				return nil, nil, ErrInvalidRole
 			}
+			sub := k.UpsertMember.GetSub()
+			// I2: demoting the sole owner via upsert is the same invariant
+			// violation RemoveMember already guards against — an upsert
+			// that changes an existing owner to a non-owner role, leaving
+			// zero owners, must be rejected identically. A brand-new
+			// member, a promotion, or re-upserting the sole owner AS owner
+			// (role unchanged) are all unaffected.
+			if currentRole, isMember := s.GetMembers()[sub]; isMember && currentRole == "owner" && role != "owner" && ownerCount(s) <= 1 {
+				return nil, nil, ErrLastOwner
+			}
 			return []*controlplanev1.OrgEvent{
 				wrap(&controlplanev1.MemberUpserted{
-					Sub:  k.UpsertMember.GetSub(),
+					Sub:  sub,
 					Role: role,
 				}),
 			}, nil, nil
@@ -120,9 +130,18 @@ var Decider = es.Decider[*controlplanev1.Org, *controlplanev1.OrgCommand, *contr
 			if s.GetId() == "" {
 				return nil, nil, ErrNotFound
 			}
+			id := k.CreateProject.GetId()
+			// I3: a project id that already exists — archived or not — can
+			// never be (re-)created. Archiving is a one-way retirement of
+			// the id, not an undo-able soft-delete; without this check a
+			// caller could revive an archived project (and silently
+			// discard its archived-ness) just by re-issuing CreateProject.
+			if _, ok := s.GetProjects()[id]; ok {
+				return nil, nil, ErrAlreadyExists
+			}
 			return []*controlplanev1.OrgEvent{
 				wrap(&controlplanev1.ProjectCreated{
-					Id:   k.CreateProject.GetId(),
+					Id:   id,
 					Name: k.CreateProject.GetName(),
 				}),
 			}, nil, nil

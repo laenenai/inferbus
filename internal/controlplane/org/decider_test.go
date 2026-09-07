@@ -285,6 +285,105 @@ func TestRemoveNonMemberIsNoOp(t *testing.T) {
 	}
 }
 
+// TestUpsertMember_LastOwnerDemotionGuard is finding I2: UpsertMember must
+// reject demoting the sole owner to a non-owner role exactly like
+// RemoveMember already rejects removing the sole owner outright — an
+// upsert-based demotion is otherwise an unguarded bypass of that same
+// invariant. Promoting, adding a brand-new member, and re-upserting the
+// sole owner AS owner (a true no-op role-wise) must all keep working.
+func TestUpsertMember_LastOwnerDemotionGuard(t *testing.T) {
+	ctx := context.Background()
+	rt := newRuntime(t)
+	stream := sid(t, "acme")
+
+	if _, err := rt.Handle(ctx, stream, createCmd("acme", "Acme Inc", "sub-owner"), es.Meta{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Demoting the sole owner is rejected.
+	if _, err := rt.Handle(ctx, stream, upsertMemberCmd("sub-owner", "admin"), es.Meta{}); !errors.Is(err, org.ErrLastOwner) {
+		t.Fatalf("demote sole owner: got %v, want ErrLastOwner", err)
+	}
+
+	// Re-upserting the sole owner AS owner is a no-op role-wise and stays fine.
+	if _, err := rt.Handle(ctx, stream, upsertMemberCmd("sub-owner", "owner"), es.Meta{}); err != nil {
+		t.Fatalf("re-upsert sole owner as owner: %v", err)
+	}
+
+	// Adding a brand-new member (even as a non-owner role) is unaffected.
+	if _, err := rt.Handle(ctx, stream, upsertMemberCmd("sub-viewer", "viewer"), es.Meta{}); err != nil {
+		t.Fatalf("upsert new member: %v", err)
+	}
+
+	// Promoting an existing non-owner member is unaffected.
+	if _, err := rt.Handle(ctx, stream, upsertMemberCmd("sub-viewer", "admin"), es.Meta{}); err != nil {
+		t.Fatalf("promote existing member: %v", err)
+	}
+
+	// Add a second owner, then demoting either one individually is fine.
+	res, err := rt.Handle(ctx, stream, upsertMemberCmd("sub-owner2", "owner"), es.Meta{})
+	if err != nil {
+		t.Fatalf("add second owner: %v", err)
+	}
+	if res.State.GetMembers()["sub-owner2"] != "owner" {
+		t.Fatalf("sub-owner2 role = %q, want owner", res.State.GetMembers()["sub-owner2"])
+	}
+	if _, err := rt.Handle(ctx, stream, upsertMemberCmd("sub-owner2", "admin"), es.Meta{}); err != nil {
+		t.Fatalf("demote one of two owners: %v", err)
+	}
+
+	// Now sub-owner is the sole owner again: demoting it is once again
+	// rejected.
+	if _, err := rt.Handle(ctx, stream, upsertMemberCmd("sub-owner", "viewer"), es.Meta{}); !errors.Is(err, org.ErrLastOwner) {
+		t.Fatalf("demote sole owner (again): got %v, want ErrLastOwner", err)
+	}
+}
+
+// TestCreateProject_NoRevival is finding I3: CreateProject must reject an
+// id that already exists in the org, whether or not it has been archived —
+// archiving is meant to be a one-way retirement of a project id, not an
+// undo-able soft-delete a caller can bypass by simply re-creating.
+func TestCreateProject_NoRevival(t *testing.T) {
+	ctx := context.Background()
+	rt := newRuntime(t)
+	stream := sid(t, "acme")
+
+	if _, err := rt.Handle(ctx, stream, createCmd("acme", "Acme Inc", "sub-owner"), es.Meta{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := rt.Handle(ctx, stream, createProjectCmd("proj-1", "Project One"), es.Meta{}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	// Creating the same id again (still live) is rejected.
+	if _, err := rt.Handle(ctx, stream, createProjectCmd("proj-1", "Project One Again"), es.Meta{}); !errors.Is(err, org.ErrAlreadyExists) {
+		t.Fatalf("create duplicate live project: got %v, want ErrAlreadyExists", err)
+	}
+
+	if _, err := rt.Handle(ctx, stream, archiveProjectCmd("proj-1"), es.Meta{}); err != nil {
+		t.Fatalf("archive project: %v", err)
+	}
+
+	// Creating the same id after archiving is ALSO rejected — no revival.
+	res, err := rt.Handle(ctx, stream, createProjectCmd("proj-1", "Reborn"), es.Meta{})
+	if !errors.Is(err, org.ErrAlreadyExists) {
+		t.Fatalf("create-after-archive: got %v, want ErrAlreadyExists", err)
+	}
+	_ = res
+
+	// The project stays archived, unaffected by the rejected attempt.
+	state, _, err := rt.Load(ctx, stream)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !state.GetProjects()["proj-1"].GetArchived() {
+		t.Fatal("project after rejected re-create: archived=false, want true (unchanged)")
+	}
+	if state.GetProjects()["proj-1"].GetName() != "Project One" {
+		t.Fatalf("project name after rejected re-create = %q, want unchanged %q", state.GetProjects()["proj-1"].GetName(), "Project One")
+	}
+}
+
 // TestFullFold runs the whole command sequence from the brief and confirms
 // Load — a fresh fold from the log, not cached state — reconstructs the
 // expected members map and archived project.

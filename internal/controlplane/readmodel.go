@@ -333,11 +333,19 @@ var pgSchema = []string{
 		role TEXT NOT NULL,
 		PRIMARY KEY (org, sub)
 	)`,
+	// C1: primary key is (org, id), not id alone — project ids are only
+	// ever unique within an org (the org aggregate's own CreateProject
+	// guard, org/decider.go, enforces uniqueness per-org, never globally),
+	// so two different orgs each independently choosing project id
+	// "default" is an ordinary, expected case, not a collision. A
+	// PRIMARY KEY on id alone let the second org's UpsertProject silently
+	// steal the row out from under the first.
 	`CREATE TABLE IF NOT EXISTS cp_projects (
-		id       TEXT PRIMARY KEY,
+		id       TEXT NOT NULL,
 		org      TEXT NOT NULL,
 		name     TEXT NOT NULL,
-		archived BOOLEAN NOT NULL DEFAULT false
+		archived BOOLEAN NOT NULL DEFAULT false,
+		PRIMARY KEY (org, id)
 	)`,
 	`CREATE TABLE IF NOT EXISTS cp_api_keys (
 		id             TEXT PRIMARY KEY,
@@ -405,10 +413,13 @@ func (s *PgReadStore) RemoveMember(ctx context.Context, org, sub string) error {
 }
 
 func (s *PgReadStore) UpsertProject(ctx context.Context, row ProjectRow) error {
+	// C1: conflict target is (org, id) — the table's actual primary key —
+	// so two orgs sharing a project id never collide with each other; org
+	// is part of the key, not a column to overwrite on conflict.
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO cp_projects (id, org, name, archived) VALUES ($1, $2, $3, $4)
-		ON CONFLICT (id) DO UPDATE SET
-			org = EXCLUDED.org, name = EXCLUDED.name, archived = EXCLUDED.archived`,
+		ON CONFLICT (org, id) DO UPDATE SET
+			name = EXCLUDED.name, archived = EXCLUDED.archived`,
 		row.ID, row.Org, row.Name, row.Archived)
 	if err != nil {
 		return fmt.Errorf("controlplane: pg read store: upsert project %q: %w", row.ID, err)
