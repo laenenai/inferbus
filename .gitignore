@@ -1,3 +1,4 @@
 /inferbus
 /dist/
 *.log
+/.superpowers/
