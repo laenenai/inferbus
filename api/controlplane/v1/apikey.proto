@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package controlplane.v1;
+
+option go_package = "github.com/laenenai/inferbus/api/controlplane/v1;controlplanev1";
+
+// ApiKey is the aggregate state for one API key.
+message ApiKey {
+  string id = 1;
+  string org = 2;
+  string project = 3;
+  string name = 4;
+  string hash = 5;
+  repeated string allow = 6;
+  int32 rate_limit_rpm = 7;
+  int64 monthly_token_budget = 8;
+  bool disabled = 9;
+}
+
+message CreateKey {
+  string id = 1;
+  string org = 2;
+  string project = 3;
+  string name = 4;
+  string hash = 5;
+  repeated string allow = 6;
+  int32 rate_limit_rpm = 7;
+  int64 monthly_token_budget = 8;
+}
+
+message RotateKey {
+  string new_hash = 1;
+}
+
+message DisableKey {}
+
+message SetAllowlist {
+  repeated string allow = 1;
+}
+
+message SetLimits {
+  int32 rate_limit_rpm = 1;
+  int64 monthly_token_budget = 2;
+}
+
+message ApiKeyCommand {
+  oneof kind {
+    CreateKey create = 1;
+    RotateKey rotate = 2;
+    DisableKey disable = 3;
+    SetAllowlist set_allowlist = 4;
+    SetLimits set_limits = 5;
+  }
+}
+
+message KeyCreated {
+  string id = 1;
+  string org = 2;
+  string project = 3;
+  string name = 4;
+  string hash = 5;
+  repeated string allow = 6;
+  int32 rate_limit_rpm = 7;
+  int64 monthly_token_budget = 8;
+}
+
+// KeyRotated carries the retired hash (spec §2), never the plaintext.
+message KeyRotated {
+  string new_hash = 1;
+  string previous_hash = 2;
+}
+
+// KeyDisabled carries the retired (current-at-time-of-disable) hash (spec §2).
+message KeyDisabled {
+  string current_hash = 1;
+}
+
+message KeyAllowlistChanged {
+  repeated string allow = 1;
+}
+
+message KeyLimitsChanged {
+  int32 rate_limit_rpm = 1;
+  int64 monthly_token_budget = 2;
+}
+
+message ApiKeyEvent {
+  oneof kind {
+    KeyCreated created = 1;
+    KeyRotated rotated = 2;
+    KeyDisabled disabled = 3;
+    KeyAllowlistChanged allowlist_changed = 4;
+    KeyLimitsChanged limits_changed = 5;
+  }
+}

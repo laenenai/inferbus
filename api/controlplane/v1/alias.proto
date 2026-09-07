@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package controlplane.v1;
+
+option go_package = "github.com/laenenai/inferbus/api/controlplane/v1;controlplanev1";
+
+// Alias is the aggregate state for one model/route alias.
+message Alias {
+  string scope = 1;
+  string name = 2;
+  string target = 3;
+  map<string, string> params = 4;
+  bool deleted = 5;
+}
+
+message SetAlias {
+  string target = 1;
+  map<string, string> params = 2;
+}
+
+message DeleteAlias {}
+
+message AliasCommand {
+  oneof kind {
+    SetAlias set = 1;
+    DeleteAlias delete = 2;
+  }
+}
+
+message AliasSet {
+  string target = 1;
+  map<string, string> params = 2;
+}
+
+message AliasDeleted {}
+
+message AliasEvent {
+  oneof kind {
+    AliasSet set = 1;
+    AliasDeleted deleted = 2;
+  }
+}
