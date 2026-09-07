@@ -34,9 +34,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	controlplanev1 "github.com/laenenai/inferbus/api/controlplane/v1"
 	"github.com/laenenai/inferbus/internal/controlplane/alias"
@@ -71,6 +73,11 @@ type Admin struct {
 	keyRT   KeyRuntime
 	aliasRT AliasRuntime
 	resync  func(ctx context.Context) error
+	// healthy reports whether the runner's relay + projectors are
+	// currently up (review finding I1). nil means "always healthy" — the
+	// zero value is safe for callers (e.g. simple unit tests) that don't
+	// care about this. See isHealthy/authorizeOrgRole.
+	healthy func() bool
 }
 
 // NewAdmin wires an Admin. resync is called by POST
@@ -78,8 +85,18 @@ type Admin struct {
 // projector lifecycles, so this closure is expected to stop them, run
 // ResyncKV, and restart them (binding controller ruling 3) — Admin itself
 // knows nothing about projector goroutines.
-func NewAdmin(auth Authenticator, rs ReadStore, orgRT OrgRuntime, keyRT KeyRuntime, aliasRT AliasRuntime, resync func(ctx context.Context) error) *Admin {
-	return &Admin{auth: auth, rs: rs, orgRT: orgRT, keyRT: keyRT, aliasRT: aliasRT, resync: resync}
+//
+// healthy reports whether the relay and both KV/SQL projectors are
+// currently running (the same signal /readyz uses). A nil healthy treats
+// the process as always healthy. Non-platform-admin authorization fails
+// closed (503) while healthy reports false — see authorizeOrgRole.
+func NewAdmin(auth Authenticator, rs ReadStore, orgRT OrgRuntime, keyRT KeyRuntime, aliasRT AliasRuntime, resync func(ctx context.Context) error, healthy func() bool) *Admin {
+	return &Admin{auth: auth, rs: rs, orgRT: orgRT, keyRT: keyRT, aliasRT: aliasRT, resync: resync, healthy: healthy}
+}
+
+// isHealthy is the nil-safe accessor for Admin.healthy.
+func (a *Admin) isHealthy() bool {
+	return a.healthy == nil || a.healthy()
 }
 
 // Routes returns the /admin/v1 mux (spec §3's endpoint table, plus its "GET
@@ -109,19 +126,38 @@ func (a *Admin) Routes() *http.ServeMux {
 
 	mux.HandleFunc("POST /admin/v1/projections/resync", a.resyncProjections)
 
+	// Catch-all: any /admin/v1/* request that doesn't match one of the
+	// patterns above (unknown path, or a known path with the wrong
+	// method) gets our OpenAI-style JSON body instead of net/http's
+	// default plain-text 404/405 (folded-in minor). Go's ServeMux
+	// precedence rules mean this subtree pattern only ever fires when no
+	// more specific (and therefore method-matching) pattern above applies
+	// — verified empirically: registering it alongside exact
+	// method-specific patterns does not shadow them.
+	mux.HandleFunc("/admin/v1/", func(w http.ResponseWriter, r *http.Request) {
+		writeAdminError(w, http.StatusNotFound, errTypeNotFound, "no such admin route: "+r.Method+" "+r.URL.Path)
+	})
+
 	return mux
 }
 
 // --- error/response plumbing ------------------------------------------------
 
 const (
-	errTypeInvalidRequest = "invalid_request_error"
-	errTypeAuthn          = "authentication_error"
-	errTypePermission     = "permission_error"
-	errTypeNotFound       = "not_found_error"
-	errTypeConflict       = "conflict_error"
-	errTypeInternal       = "internal_error"
+	errTypeInvalidRequest     = "invalid_request_error"
+	errTypeAuthn              = "authentication_error"
+	errTypePermission         = "permission_error"
+	errTypeNotFound           = "not_found_error"
+	errTypeConflict           = "conflict_error"
+	errTypeInternal           = "internal_error"
+	errTypeServiceUnavailable = "service_unavailable"
 )
+
+// ErrProjectionsUnhealthy is authorizeOrgRole's fail-closed sentinel
+// (review finding I1): returned instead of resolving a non-platform-admin
+// caller's role when the runner reports the relay/projectors unhealthy.
+// admin.go maps it to 503 service_unavailable.
+var ErrProjectionsUnhealthy = errors.New("controlplane: projections unhealthy; refusing non-platform-admin authorization")
 
 // writeAdminError matches the gateway's oaiError shape exactly
 // (internal/gateway/gateway.go): {"error":{"message":...,"type":...}}.
@@ -137,6 +173,15 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeInternalError logs the real error server-side — which may contain
+// backend-specific detail (SQL driver text, es-lite internals) that must
+// never reach a client — and writes a generic, safe 500 body instead
+// (folded-in minor).
+func writeInternalError(w http.ResponseWriter, context string, err error) {
+	log.Printf("controlplane: admin: %s: %v", context, err)
+	writeAdminError(w, http.StatusInternalServerError, errTypeInternal, "internal error")
 }
 
 // writeAggregateError maps a Decide sentinel (or a retry-exhausted
@@ -156,17 +201,24 @@ func writeAggregateError(w http.ResponseWriter, err error) {
 		// unresolved conflict.
 		writeAdminError(w, http.StatusConflict, errTypeConflict, "concurrent modification; retry the request")
 	default:
-		writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+		writeInternalError(w, "aggregate dispatch", err)
 	}
 }
 
+// maxRequestBody caps every admin request body (folded-in minor): an
+// unauthenticated-until-parsed, unbounded body is a trivial memory-exhaustion
+// vector for a JSON API.
+const maxRequestBody = 1 << 20 // 1 MiB
+
 // decodeJSON decodes r's body into v, writing a 400 invalid_request_error
-// and returning false on any failure (missing body, malformed JSON).
+// and returning false on any failure (missing body, malformed JSON, body
+// too large).
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	if r.Body == nil {
 		writeAdminError(w, http.StatusBadRequest, errTypeInvalidRequest, "request body is required")
 		return false
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	defer r.Body.Close()
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		writeAdminError(w, http.StatusBadRequest, errTypeInvalidRequest, "invalid JSON body: "+err.Error())
@@ -239,14 +291,35 @@ func (a *Admin) authenticate(w http.ResponseWriter, r *http.Request) (Identity, 
 }
 
 // authorizeOrgRole resolves id's role within orgID via ReadStore.GetOrg and
-// reports whether that role satisfies need. Platform admins short-circuit
-// to true without ever consulting the ReadStore (binding ruling: they must
-// never be blocked by projector lag). err is non-nil only for a genuine
-// lookup failure — ErrOrgNotFound or an infra error — which the caller
-// must check with errors.Is before treating a false ok as "forbidden".
+// reports whether that role satisfies need.
+//
+// Platform admins short-circuit to true without ever consulting the
+// ReadStore (binding ruling: they must never be blocked by projector lag
+// or downtime) and are the ONE class of caller unaffected by isHealthy.
+//
+// Every other caller fails CLOSED (ErrProjectionsUnhealthy, mapped to 503
+// by authorizeOrg — review finding I1) the instant isHealthy reports
+// false, i.e. once the relay or either projector has fail-stopped. This is
+// deliberately stricter than "the role table might be a little stale":
+// ReadStore.GetOrg is fed by an at-least-once, eventually-consistent SQL
+// projector (Task 8), so under NORMAL operation a just-added member or a
+// just-created org can lag the write that produced it by low milliseconds
+// — that is expected, not a bug, and every admin_test.go case that depends
+// on it polls (waitForSQL) rather than asserting instantaneous visibility.
+// (One visible corollary: a caller who JUST created an org, or was JUST
+// added as a member, can see a spurious 404/403 for a few milliseconds
+// until the projector catches up.) What isHealthy actually guards against
+// is different in kind: once the feed is KNOWN to be stopped, the role
+// table isn't merely a few milliseconds behind, it is frozen at whatever
+// arbitrary position it reached before failing — authorizing against it
+// forever after would silently keep honoring stale roles (e.g. a removed
+// member, or a demoted owner) instead of visibly refusing service.
 func (a *Admin) authorizeOrgRole(ctx context.Context, id Identity, orgID, need string) (ok bool, err error) {
 	if id.PlatformAdmin {
 		return true, nil
+	}
+	if !a.isHealthy() {
+		return false, ErrProjectionsUnhealthy
 	}
 	_, members, _, err := a.rs.GetOrg(ctx, orgID)
 	if err != nil {
@@ -263,14 +336,18 @@ func (a *Admin) authorizeOrgRole(ctx context.Context, id Identity, orgID, need s
 }
 
 // authorizeOrg is authorizeOrgRole plus the HTTP response: it writes
-// 404/500/403 as appropriate and returns false when the request must stop.
+// 503/404/500/403 as appropriate and returns false when the request must
+// stop.
 func (a *Admin) authorizeOrg(w http.ResponseWriter, r *http.Request, id Identity, orgID, need string) bool {
 	ok, err := a.authorizeOrgRole(r.Context(), id, orgID, need)
 	if err != nil {
-		if errors.Is(err, ErrOrgNotFound) {
+		switch {
+		case errors.Is(err, ErrProjectionsUnhealthy):
+			writeAdminError(w, http.StatusServiceUnavailable, errTypeServiceUnavailable, "control plane projections are currently unhealthy; try again shortly")
+		case errors.Is(err, ErrOrgNotFound):
 			writeAdminError(w, http.StatusNotFound, errTypeNotFound, "org not found")
-		} else {
-			writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+		default:
+			writeInternalError(w, "authorizeOrg", err)
 		}
 		return false
 	}
@@ -281,13 +358,23 @@ func (a *Admin) authorizeOrg(w http.ResponseWriter, r *http.Request, id Identity
 	return true
 }
 
-// authorizeAliasScope is authorizeOrg's alias-scope counterpart: the
-// "_global" scope needs PlatformAdmin outright (binding ruling), any other
-// scope is an org id authorized exactly like authorizeOrg.
+// authorizeAliasScope is authorizeOrg's alias-scope counterpart.
+//
+// CONTROLLER RULING (review finding I4d, supersedes the original "_global
+// requires PlatformAdmin outright" reading): reading the "_global" scope
+// only needs "read" — global aliases are non-secret, system-wide routing
+// config, not an org's private data, so any authenticated caller (not just
+// an org member — there's no org to be a member OF for the global scope)
+// may list them. Mutating "_global" (set/delete) still requires
+// PlatformAdmin outright, since it changes routing for every org at once.
+// Any other scope is an org id, authorized exactly like authorizeOrg.
 func (a *Admin) authorizeAliasScope(w http.ResponseWriter, r *http.Request, id Identity, scope, need string) bool {
 	if scope == globalScope {
+		if need == "read" {
+			return true
+		}
 		if !id.PlatformAdmin {
-			writeAdminError(w, http.StatusForbidden, errTypePermission, `the "_global" alias scope requires platform admin`)
+			writeAdminError(w, http.StatusForbidden, errTypePermission, `mutating the "_global" alias scope requires platform admin`)
 			return false
 		}
 		return true
@@ -454,7 +541,7 @@ func (a *Admin) createOrg(w http.ResponseWriter, r *http.Request) {
 
 	ownerSub := strings.TrimSpace(body.OwnerSub)
 	if ownerSub == "" {
-		if id.Sub == "bootstrap" {
+		if id.Bootstrap {
 			writeAdminError(w, http.StatusBadRequest, errTypeInvalidRequest, "owner_sub is required when authenticated via the bootstrap token")
 			return
 		}
@@ -490,7 +577,7 @@ func (a *Admin) listOrgs(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := a.rs.ListOrgs(r.Context())
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+		writeInternalError(w, "listOrgs", err)
 		return
 	}
 	out := make([]orgSummary, 0, len(rows))
@@ -514,7 +601,7 @@ func (a *Admin) getOrg(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ErrOrgNotFound) {
 			writeAdminError(w, http.StatusNotFound, errTypeNotFound, "org not found")
 		} else {
-			writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+			writeInternalError(w, "getOrg", err)
 		}
 		return
 	}
@@ -734,7 +821,7 @@ func (a *Admin) createKey(w http.ResponseWriter, r *http.Request) {
 	}
 	orgState, _, err := a.orgRT.Load(r.Context(), orgSid)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+		writeInternalError(w, "createKey: load org", err)
 		return
 	}
 	if orgState.GetId() == "" {
@@ -751,7 +838,7 @@ func (a *Admin) createKey(w http.ResponseWriter, r *http.Request) {
 
 	keySid, err := es.NewStreamID(apikey.StreamType, keyID)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+		writeInternalError(w, "createKey: new stream id", err)
 		return
 	}
 	cmd := &controlplanev1.ApiKeyCommand{Kind: &controlplanev1.ApiKeyCommand_Create{Create: &controlplanev1.CreateKey{
@@ -784,7 +871,7 @@ func (a *Admin) listKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := a.rs.ListKeys(r.Context(), orgID)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+		writeInternalError(w, "listKeys", err)
 		return
 	}
 	out := make([]keyResponse, 0, len(rows))
@@ -802,7 +889,7 @@ func (a *Admin) rotateKey(w http.ResponseWriter, r *http.Request) {
 	keyID := r.PathValue("id")
 	orgID, sid, found, err := a.loadKeyOrg(r.Context(), keyID)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+		writeInternalError(w, "rotateKey: loadKeyOrg", err)
 		return
 	}
 	if !found {
@@ -833,7 +920,7 @@ func (a *Admin) disableKey(w http.ResponseWriter, r *http.Request) {
 	keyID := r.PathValue("id")
 	orgID, sid, found, err := a.loadKeyOrg(r.Context(), keyID)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+		writeInternalError(w, "disableKey: loadKeyOrg", err)
 		return
 	}
 	if !found {
@@ -864,7 +951,7 @@ func (a *Admin) setAllowlist(w http.ResponseWriter, r *http.Request) {
 	keyID := r.PathValue("id")
 	orgID, sid, found, err := a.loadKeyOrg(r.Context(), keyID)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+		writeInternalError(w, "setAllowlist: loadKeyOrg", err)
 		return
 	}
 	if !found {
@@ -900,7 +987,7 @@ func (a *Admin) setLimits(w http.ResponseWriter, r *http.Request) {
 	keyID := r.PathValue("id")
 	orgID, sid, found, err := a.loadKeyOrg(r.Context(), keyID)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+		writeInternalError(w, "setLimits: loadKeyOrg", err)
 		return
 	}
 	if !found {
@@ -1017,7 +1104,7 @@ func (a *Admin) listAliases(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := a.rs.ListAliases(r.Context(), scope)
 	if err != nil {
-		writeAdminError(w, http.StatusInternalServerError, errTypeInternal, err.Error())
+		writeInternalError(w, "listAliases", err)
 		return
 	}
 	out := make([]aliasResponse, 0, len(rows))
@@ -1029,11 +1116,31 @@ func (a *Admin) listAliases(w http.ResponseWriter, r *http.Request) {
 
 // --- resync handler ----------------------------------------------------------
 
-// resyncProjections is PlatformAdmin-only (binding ruling). It always
-// responds 202: the injected resync closure self-coordinates the
-// projector stop/ResyncKV/restart sequence (binding ruling 3), and even a
-// failed resync has already stopped-and-restarted the projectors by the
-// time this returns, so there is no separate "pending" state to report.
+// resyncTimeout bounds how long a resync (bucket destroy/recreate + full
+// replay + projector restart) is allowed to run once the triggering HTTP
+// request's own context has been detached (see resyncProjections) — a
+// generous ceiling so a genuinely large event log doesn't get cut off, but
+// still finite so a wedged resync doesn't hang the process forever.
+const resyncTimeout = 10 * time.Minute
+
+// resyncProjections is PlatformAdmin-only (binding ruling).
+//
+// Review finding C2: the request's own context MUST NOT be able to cancel
+// ResyncKV — a client disconnect between the KV bucket destroy and the
+// marker reset would otherwise abort mid-resync, permanently leaving
+// KEYS/ALIASES empty until an operator notices and reruns it. So the
+// context handed to a.resync is context.WithoutCancel(r.Context()) (drops
+// the client's cancellation entirely, keeps any request-scoped values)
+// wrapped in its own bounded resyncTimeout, not the request's lifetime.
+//
+// Review finding I3: success is 202 (the injected resync closure
+// self-coordinates the projector stop/ResyncKV/restart sequence per
+// binding ruling 3, and has already finished — successfully — by the time
+// this returns); failure is 500, with the real error logged server-side
+// and never echoed to the client. Even on failure the closure has already
+// restarted the projectors (see runner.go's resyncFn), so /readyz reflects
+// reality on its own via the same health signal this 500 doesn't need to
+// duplicate.
 func (a *Admin) resyncProjections(w http.ResponseWriter, r *http.Request) {
 	id, ok := a.authenticate(w, r)
 	if !ok {
@@ -1043,13 +1150,15 @@ func (a *Admin) resyncProjections(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusForbidden, errTypePermission, "projection resync requires platform admin")
 		return
 	}
-	err := a.resync(r.Context())
-	resp := map[string]any{
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), resyncTimeout)
+	defer cancel()
+	if err := a.resync(ctx); err != nil {
+		writeInternalError(w, "resync", err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status": "accepted",
 		"note":   "ALIASES/KEYS KV projections are briefly unavailable while resync runs",
-	}
-	if err != nil {
-		resp["error"] = err.Error()
-	}
-	writeJSON(w, http.StatusAccepted, resp)
+	})
 }

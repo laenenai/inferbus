@@ -37,6 +37,13 @@ type Identity struct {
 	// subject listed in Config.PlatformAdmins. Platform admins bypass
 	// per-org role checks in Authorize.
 	PlatformAdmin bool
+	// Bootstrap is true only for the bootstrap-token identity. Callers
+	// that need to distinguish "authenticated via the shared bootstrap
+	// secret" from "an OIDC platform admin" (e.g. admin.go's createOrg,
+	// which requires an explicit owner_sub in the body only for the
+	// bootstrap identity, since it has no subject of its own) must check
+	// this field rather than the Sub == "bootstrap" magic string.
+	Bootstrap bool
 }
 
 // ErrUnauthenticated is returned by Authenticate when the request carries no
@@ -90,7 +97,7 @@ func (a *Auth) Authenticate(r *http.Request) (Identity, error) {
 		// bootstrap token is a high-entropy secret, and length alone is not
 		// exploitable.
 		if subtle.ConstantTimeCompare(presented, configured) == 1 {
-			return Identity{Sub: "bootstrap", PlatformAdmin: true}, nil
+			return Identity{Sub: "bootstrap", PlatformAdmin: true, Bootstrap: true}, nil
 		}
 	}
 

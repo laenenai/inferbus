@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,11 +28,14 @@ import (
 // brief specifies ("httptest over Admin.Routes(), sqlite store,
 // MemReadStore fed live by RunSQLProjector running live").
 type adminFixture struct {
-	admin *Admin
-	rs    *MemReadStore
+	admin   *Admin
+	rs      *MemReadStore
+	orgRT   OrgRuntime
+	keyRT   KeyRuntime
+	aliasRT AliasRuntime
 }
 
-func newAdminFixture(t *testing.T, cfg Config, verifier TokenVerifier, resync func(context.Context) error) *adminFixture {
+func newAdminFixture(t *testing.T, cfg Config, verifier TokenVerifier, resync func(context.Context) error, healthy func() bool) *adminFixture {
 	t.Helper()
 
 	relayCtx, cancelRelay := context.WithCancel(context.Background())
@@ -62,8 +66,8 @@ func newAdminFixture(t *testing.T, cfg Config, verifier TokenVerifier, resync fu
 	if resync == nil {
 		resync = func(context.Context) error { return nil }
 	}
-	admin := NewAdmin(NewAuthenticator(cfg, verifier), rs, orgRT, keyRT, aliasRT, resync)
-	return &adminFixture{admin: admin, rs: rs}
+	admin := NewAdmin(NewAuthenticator(cfg, verifier), rs, orgRT, keyRT, aliasRT, resync, healthy)
+	return &adminFixture{admin: admin, rs: rs, orgRT: orgRT, keyRT: keyRT, aliasRT: aliasRT}
 }
 
 // doRequest fires one request through mux and returns the recorded
@@ -110,7 +114,7 @@ func decodeErrorType(t *testing.T, rec *httptest.ResponseRecorder) string {
 
 func TestAdmin_Unauthenticated401(t *testing.T) {
 	cfg := Config{BootstrapToken: "s3cret"}
-	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil)
+	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
 	mux := f.admin.Routes()
 
 	rec := doRequest(t, mux, http.MethodGet, "/admin/v1/orgs", "", nil)
@@ -124,7 +128,7 @@ func TestAdmin_Unauthenticated401(t *testing.T) {
 
 func TestAdmin_CreateOrg_BootstrapRequiresOwnerSub(t *testing.T) {
 	cfg := Config{BootstrapToken: "s3cret"}
-	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil)
+	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
 	mux := f.admin.Routes()
 
 	// Bootstrap has no real subject of its own: owner_sub is required.
@@ -169,7 +173,7 @@ func TestAdmin_CreateOrg_BootstrapRequiresOwnerSub(t *testing.T) {
 func TestAdmin_CreateOrg_OIDCDefaultsOwnerSubToCaller(t *testing.T) {
 	cfg := Config{PlatformAdmins: []string{"admin-oidc-sub"}}
 	verifier := &fakeVerifier{subs: map[string]string{"jwt-for-admin": "admin-oidc-sub"}}
-	f := newAdminFixture(t, cfg, verifier, nil)
+	f := newAdminFixture(t, cfg, verifier, nil, nil)
 	mux := f.admin.Routes()
 
 	// No owner_sub in the body: an OIDC caller's own sub is the default.
@@ -194,7 +198,7 @@ func TestAdmin_CreateOrg_OIDCDefaultsOwnerSubToCaller(t *testing.T) {
 
 func TestAdmin_CreateKey_PlaintextOnce_ListHidesHashAndPlaintext(t *testing.T) {
 	cfg := Config{BootstrapToken: "s3cret"}
-	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil)
+	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
 	mux := f.admin.Routes()
 
 	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
@@ -266,7 +270,7 @@ func TestAdmin_NonMemberForbidden_ViewerForbiddenOnManage(t *testing.T) {
 		"jwt-stranger": "stranger",
 		"jwt-viewer":   "viewer-1",
 	}}
-	f := newAdminFixture(t, cfg, verifier, nil)
+	f := newAdminFixture(t, cfg, verifier, nil, nil)
 	mux := f.admin.Routes()
 
 	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
@@ -311,18 +315,23 @@ func TestAdmin_NonMemberForbidden_ViewerForbiddenOnManage(t *testing.T) {
 	}
 }
 
-func TestAdmin_AliasGlobalScope_RequiresPlatformAdmin(t *testing.T) {
+func TestAdmin_AliasGlobalScope_MutationsRequirePlatformAdmin(t *testing.T) {
 	cfg := Config{BootstrapToken: "s3cret", PlatformAdmins: []string{"admin-sub"}}
 	verifier := &fakeVerifier{subs: map[string]string{
 		"jwt-nonadmin": "someone",
 		"jwt-admin":    "admin-sub",
 	}}
-	f := newAdminFixture(t, cfg, verifier, nil)
+	f := newAdminFixture(t, cfg, verifier, nil, nil)
 	mux := f.admin.Routes()
 
 	rec := doRequest(t, mux, http.MethodPut, "/admin/v1/aliases/_global/fast", "jwt-nonadmin", map[string]any{"target": "gpt-4"})
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("non-admin PUT _global alias: status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doRequest(t, mux, http.MethodDelete, "/admin/v1/aliases/_global/fast", "jwt-nonadmin", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin DELETE _global alias: status = %d, want 403; body=%s", rec.Code, rec.Body.String())
 	}
 
 	rec = doRequest(t, mux, http.MethodPut, "/admin/v1/aliases/_global/fast", "jwt-admin", map[string]any{"target": "gpt-4"})
@@ -333,6 +342,55 @@ func TestAdmin_AliasGlobalScope_RequiresPlatformAdmin(t *testing.T) {
 	rec = doRequest(t, mux, http.MethodPut, "/admin/v1/aliases/_global/other", "s3cret", map[string]any{"target": "gpt-4"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("bootstrap PUT _global alias: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAdmin_AliasGlobalScope_ReadsNeedOnlyRead is review finding I4(d): a
+// non-platform-admin, non-org-member-of-anything-relevant caller may still
+// GET the "_global" alias scope — global aliases are non-secret, system-
+// wide routing config, not an org's private data, so reads only need
+// "read" (which every authenticated caller trivially has), while mutations
+// (covered above) still require platform admin outright.
+func TestAdmin_AliasGlobalScope_ReadsNeedOnlyRead(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret", PlatformAdmins: []string{"admin-sub"}}
+	verifier := &fakeVerifier{subs: map[string]string{
+		"jwt-admin":  "admin-sub",
+		"jwt-member": "org-member-1",
+	}}
+	f := newAdminFixture(t, cfg, verifier, nil, nil)
+	mux := f.admin.Routes()
+
+	// Seed a global alias as platform admin.
+	rec := doRequest(t, mux, http.MethodPut, "/admin/v1/aliases/_global/fast", "jwt-admin", map[string]any{"target": "gpt-4"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed _global alias: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	waitForSQL(t, func() (bool, error) {
+		rows, err := f.rs.ListAliases(context.Background(), globalScope)
+		if err != nil {
+			return false, err
+		}
+		return len(rows) == 1, nil
+	})
+
+	// An ordinary org member (no platform admin, not a member of any org
+	// relevant to "_global" — there is none) can still read it.
+	rec = doRequest(t, mux, http.MethodGet, "/admin/v1/aliases/_global", "jwt-member", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("non-admin GET _global aliases: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var aliases []aliasResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &aliases); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := false
+	for _, a := range aliases {
+		if a.Name == "fast" && a.Target == "gpt-4" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("aliases = %+v, want fast->gpt-4", aliases)
 	}
 }
 
@@ -382,7 +440,7 @@ func TestAdmin_ConflictRetryOnce_ThenFailOn409(t *testing.T) {
 	// Bootstrap is PlatformAdmin, so authorizeOrg short-circuits without
 	// ever consulting a ReadStore — this test needs none of the
 	// SQL-projector machinery, just the retry-then-409 dispatch path.
-	admin := NewAdmin(NewAuthenticator(cfg, &fakeVerifier{}), NewMemReadStore(), orgRT, keyRT, aliasRT, func(context.Context) error { return nil })
+	admin := NewAdmin(NewAuthenticator(cfg, &fakeVerifier{}), NewMemReadStore(), orgRT, keyRT, aliasRT, func(context.Context) error { return nil }, nil)
 	mux := admin.Routes()
 
 	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
@@ -415,7 +473,7 @@ func TestAdmin_Resync_PlatformAdminOnly(t *testing.T) {
 	verifier := &fakeVerifier{subs: map[string]string{"jwt-nonadmin": "someone"}}
 	var called bool
 	resync := func(context.Context) error { called = true; return nil }
-	f := newAdminFixture(t, cfg, verifier, resync)
+	f := newAdminFixture(t, cfg, verifier, resync, nil)
 	mux := f.admin.Routes()
 
 	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/projections/resync", "jwt-nonadmin", nil)
@@ -432,5 +490,319 @@ func TestAdmin_Resync_PlatformAdminOnly(t *testing.T) {
 	}
 	if !called {
 		t.Fatalf("resync must be invoked for a platform-admin caller")
+	}
+}
+
+// TestAdmin_UnmatchedRouteReturnsJSON is the folded-in "404/405 fallback"
+// minor: an unknown path and a known path with the wrong method must both
+// get the OpenAI-style JSON error body, not net/http's default plain text.
+func TestAdmin_UnmatchedRouteReturnsJSON(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret"}
+	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
+	mux := f.admin.Routes()
+
+	for _, c := range []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"unknown path", http.MethodGet, "/admin/v1/nonexistent"},
+		{"known path wrong method", http.MethodDelete, "/admin/v1/orgs"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rec := doRequest(t, mux, c.method, c.path, "s3cret", nil)
+			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json; body=%s", ct, rec.Body.String())
+			}
+			if typ := decodeErrorType(t, rec); typ != errTypeNotFound {
+				t.Fatalf("error.type = %q, want %q; status=%d", typ, errTypeNotFound, rec.Code)
+			}
+		})
+	}
+}
+
+// --- review round: I4 authz tests -------------------------------------------
+
+// TestAdmin_OrgAdminCannotMutateAnotherOrgsKey is I4(a): an admin of org A
+// has no standing whatsoever over org B's keys — every mutation route must
+// refuse (403, or 404 if the SQL projector hasn't caught org B up yet —
+// either is acceptable per the review note, but never success).
+func TestAdmin_OrgAdminCannotMutateAnotherOrgsKey(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret"}
+	verifier := &fakeVerifier{subs: map[string]string{"jwt-admin-a": "admin-a"}}
+	f := newAdminFixture(t, cfg, verifier, nil, nil)
+	mux := f.admin.Routes()
+
+	// Org A, with admin-a as an "admin" member.
+	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
+		"id": "orga", "name": "Org A", "owner_sub": "owner-a",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create org A: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, mux, http.MethodPut, "/admin/v1/orgs/orga/members/admin-a", "s3cret", map[string]any{"role": "admin"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upsert admin-a into org A: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Org B, with its own project and key, admin-a has no role in it.
+	rec = doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
+		"id": "orgb", "name": "Org B", "owner_sub": "owner-b",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create org B: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, mux, http.MethodPost, "/admin/v1/orgs/orgb/projects", "s3cret", map[string]any{"id": "proj-b", "name": "Proj B"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create project in org B: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, mux, http.MethodPost, "/admin/v1/keys", "s3cret", map[string]any{
+		"org": "orgb", "project": "proj-b", "name": "secret-key",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create key in org B: %d %s", rec.Code, rec.Body.String())
+	}
+	var key keyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &key); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Let both orgs' membership catch up so a denial is a genuine 403
+	// (role lookup succeeded, role was insufficient), not incidentally a
+	// 404 from projector lag — both are acceptable per the review note,
+	// but this makes the assertion meaningful either way.
+	waitForSQL(t, func() (bool, error) {
+		_, members, _, err := f.rs.GetOrg(context.Background(), "orga")
+		if err != nil {
+			return false, err
+		}
+		for _, m := range members {
+			if m.Sub == "admin-a" {
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+	waitForSQL(t, func() (bool, error) {
+		_, _, _, err := f.rs.GetOrg(context.Background(), "orgb")
+		return err == nil, nil
+	})
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   any
+	}{
+		{"rotate", http.MethodPost, "/admin/v1/keys/" + key.ID + "/rotate", nil},
+		{"disable", http.MethodPost, "/admin/v1/keys/" + key.ID + "/disable", nil},
+		{"allowlist", http.MethodPut, "/admin/v1/keys/" + key.ID + "/allowlist", map[string]any{"allow": []string{"*"}}},
+		{"limits", http.MethodPut, "/admin/v1/keys/" + key.ID + "/limits", map[string]any{"rate_limit_rpm": 1}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := doRequest(t, mux, c.method, c.path, "jwt-admin-a", c.body)
+			if rec.Code != http.StatusForbidden && rec.Code != http.StatusNotFound {
+				t.Fatalf("org A admin %s org B's key: status = %d, want 403 or 404 (never success); body=%s", c.name, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestAdmin_RotateKey_PlaintextOnceNeverHash is I4(b).
+func TestAdmin_RotateKey_PlaintextOnceNeverHash(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret"}
+	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
+	mux := f.admin.Routes()
+
+	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
+		"id": "acme", "name": "Acme", "owner_sub": "dev",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create org: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, mux, http.MethodPost, "/admin/v1/orgs/acme/projects", "s3cret", map[string]any{"id": "proj-1", "name": "Prod"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create project: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, mux, http.MethodPost, "/admin/v1/keys", "s3cret", map[string]any{
+		"org": "acme", "project": "proj-1", "name": "prod-key",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create key: %d %s", rec.Code, rec.Body.String())
+	}
+	var created keyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	originalHash := HashKey(created.Key)
+
+	rec = doRequest(t, mux, http.MethodPost, "/admin/v1/keys/"+created.ID+"/rotate", "s3cret", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotate key: %d %s", rec.Code, rec.Body.String())
+	}
+	var rotated keyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &rotated); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.HasPrefix(rotated.Key, "ib_live_") {
+		t.Fatalf("rotated key = %q, want ib_live_ prefix", rotated.Key)
+	}
+	if rotated.Key == created.Key {
+		t.Fatalf("rotate returned the same plaintext as create")
+	}
+	newHash := HashKey(rotated.Key)
+
+	body := rec.Body.String()
+	if strings.Contains(body, originalHash) || strings.Contains(body, newHash) {
+		t.Fatalf("rotate response leaked a hash: %s", body)
+	}
+
+	// A second rotate response must not still be carrying the first
+	// rotation's plaintext either (exactly once, not "sticky").
+	rec = doRequest(t, mux, http.MethodPost, "/admin/v1/keys/"+created.ID+"/rotate", "s3cret", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second rotate: %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), rotated.Key) {
+		t.Fatalf("second rotate response leaked the first rotation's plaintext: %s", rec.Body.String())
+	}
+}
+
+// TestAdmin_ValidationRejectsBadSlug is I4(c).
+func TestAdmin_ValidationRejectsBadSlug(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret"}
+	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
+	mux := f.admin.Routes()
+
+	t.Run("bad org id", func(t *testing.T) {
+		rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
+			"id": "Not A Slug!", "name": "Bad", "owner_sub": "dev",
+		})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("bad org id: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		if typ := decodeErrorType(t, rec); typ != errTypeInvalidRequest {
+			t.Fatalf("error.type = %q, want %q", typ, errTypeInvalidRequest)
+		}
+	})
+
+	t.Run("bad alias name", func(t *testing.T) {
+		rec := doRequest(t, mux, http.MethodPut, "/admin/v1/aliases/_global/Not_A_Slug", "s3cret", map[string]any{"target": "gpt-4"})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("bad alias name: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		if typ := decodeErrorType(t, rec); typ != errTypeInvalidRequest {
+			t.Fatalf("error.type = %q, want %q", typ, errTypeInvalidRequest)
+		}
+	})
+}
+
+// TestAdmin_OrgScopedAliasPUT_ProducesExpectedStreamID is the stream-id
+// half of I4(d): PUT /admin/v1/aliases/{org}/{name} must compose the
+// es-lite stream id as "o_<org>_<name>" (binding ruling 1) — checked two
+// ways: SplitAliasStreamID round-trips that exact literal id back to
+// (scope, name), and the alias aggregate's stream under that exact id
+// really was written (proving admin.go, not just the encoding helper in
+// isolation, used it).
+func TestAdmin_OrgScopedAliasPUT_ProducesExpectedStreamID(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret"}
+	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
+	mux := f.admin.Routes()
+
+	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
+		"id": "acme", "name": "Acme", "owner_sub": "dev",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create org: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, mux, http.MethodPut, "/admin/v1/aliases/acme/fast", "s3cret", map[string]any{"target": "gpt-4"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set org-scoped alias: %d %s", rec.Code, rec.Body.String())
+	}
+
+	const wantStreamID = "o_acme_fast"
+	scope, name, err := SplitAliasStreamID(wantStreamID)
+	if err != nil {
+		t.Fatalf("SplitAliasStreamID(%q): %v", wantStreamID, err)
+	}
+	if scope != "acme" || name != "fast" {
+		t.Fatalf("SplitAliasStreamID(%q) = (%q, %q), want (acme, fast)", wantStreamID, scope, name)
+	}
+
+	sid, err := es.NewStreamID(alias.StreamType, wantStreamID)
+	if err != nil {
+		t.Fatalf("NewStreamID: %v", err)
+	}
+	state, _, err := f.aliasRT.Load(context.Background(), sid)
+	if err != nil {
+		t.Fatalf("load alias stream %q: %v", wantStreamID, err)
+	}
+	if state.GetTarget() != "gpt-4" {
+		t.Fatalf("alias stream %q target = %q, want gpt-4 (PUT did not land on the expected stream id)", wantStreamID, state.GetTarget())
+	}
+}
+
+// --- review round: I1 fail-closed authz -------------------------------------
+
+// TestAdmin_FailClosedWhenProjectionsUnhealthy is I1: once the injected
+// healthy() reports false (simulating a dead relay or fail-stopped
+// projector), every non-platform-admin org-scoped request must get 503
+// service_unavailable — never authorize off whatever the role table
+// happened to be frozen at. Platform admins are unaffected.
+func TestAdmin_FailClosedWhenProjectionsUnhealthy(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret"}
+	verifier := &fakeVerifier{subs: map[string]string{"jwt-member": "member-1"}}
+	var healthy atomic.Bool
+	healthy.Store(true)
+	f := newAdminFixture(t, cfg, verifier, nil, healthy.Load)
+	mux := f.admin.Routes()
+
+	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
+		"id": "acme", "name": "Acme", "owner_sub": "dev",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create org: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, mux, http.MethodPut, "/admin/v1/orgs/acme/members/member-1", "s3cret", map[string]any{"role": "owner"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upsert member: %d %s", rec.Code, rec.Body.String())
+	}
+	waitForSQL(t, func() (bool, error) {
+		_, members, _, err := f.rs.GetOrg(context.Background(), "acme")
+		if err != nil {
+			return false, err
+		}
+		for _, m := range members {
+			if m.Sub == "member-1" {
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+
+	// Sanity: while healthy, the now-owner member can read/manage normally.
+	rec = doRequest(t, mux, http.MethodGet, "/admin/v1/orgs/acme", "jwt-member", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("member GET org while healthy: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	healthy.Store(false)
+
+	// Now unhealthy: the very same owner-role member is refused outright,
+	// not authorized off the (potentially stale-forever) frozen role
+	// table.
+	rec = doRequest(t, mux, http.MethodGet, "/admin/v1/orgs/acme", "jwt-member", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("member GET org while unhealthy: status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	if typ := decodeErrorType(t, rec); typ != errTypeServiceUnavailable {
+		t.Fatalf("error.type = %q, want %q", typ, errTypeServiceUnavailable)
+	}
+
+	// Platform admin (bootstrap) is unaffected by the unhealthy flag.
+	rec = doRequest(t, mux, http.MethodGet, "/admin/v1/orgs/acme", "s3cret", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap GET org while unhealthy: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 }
