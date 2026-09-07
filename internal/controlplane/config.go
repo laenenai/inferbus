@@ -13,12 +13,12 @@ type OIDCConfig struct {
 }
 
 type Config struct {
-	Addr           string   `yaml:"addr"`
-	PostgresDSN    string   `yaml:"postgres_dsn"`
-	NATSURL        string   `yaml:"nats_url"`
+	Addr           string     `yaml:"addr"`
+	PostgresDSN    string     `yaml:"postgres_dsn"`
+	NATSURL        string     `yaml:"nats_url"`
 	OIDC           OIDCConfig `yaml:"oidc"`
-	PlatformAdmins []string `yaml:"platform_admins"`
-	BootstrapToken string   `yaml:"bootstrap_token"`
+	PlatformAdmins []string   `yaml:"platform_admins"`
+	BootstrapToken string     `yaml:"bootstrap_token"`
 }
 
 func LoadConfig(path string) (Config, error) {
