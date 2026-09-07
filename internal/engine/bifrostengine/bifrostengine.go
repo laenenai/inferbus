@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	bifrost "github.com/maximhq/bifrost/core"
@@ -189,6 +190,15 @@ func mapError(berr *schemas.BifrostError) error {
 	msg := ""
 	if berr.Error != nil {
 		msg = berr.Error.Message
+	}
+	// A 401/403/404 from the upstream provider almost always means this
+	// worker's provider config is wrong (bad API key, wrong upstream model
+	// id) — not something the calling client did. Map it to a generic 502
+	// upstream_error, same as internal/engine/openaihttp, so it doesn't
+	// misleadingly point the caller at their own infbus credentials or
+	// request. 408/429/5xx pass through unchanged.
+	if status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusNotFound {
+		return &ibengine.Error{Code: "upstream_error", Message: msg, HTTPStatus: http.StatusBadGateway}
 	}
 	return &ibengine.Error{Code: "bifrost_error", Message: msg, HTTPStatus: status}
 }

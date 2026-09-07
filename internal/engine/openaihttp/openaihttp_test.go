@@ -63,6 +63,33 @@ func TestUpstreamErrorMapped(t *testing.T) {
 	}
 }
 
+// TestUpstreamAuthErrorsMappedTo502 covers I12: an upstream 401/403/404 is a
+// worker/deployment misconfiguration (bad API key, wrong endpoint, wrong
+// model id at the *upstream*), not something the calling client did wrong —
+// passing it straight through as our own 401/403/404 would misleadingly
+// suggest the caller's infbus credentials or request were at fault. Map it
+// to a generic 502 upstream_error instead. 408/429/5xx must keep passing
+// through unchanged (that's the caller's own rate limit / retry signal).
+func TestUpstreamAuthErrorsMappedTo502(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, `{"error":"nope"}`, status)
+			}))
+			t.Cleanup(srv.Close)
+			e := New(srv.URL, srv.Client())
+			_, _, err := e.Chat(context.Background(), "m", json.RawMessage(`{}`))
+			var ee *ibengine.Error
+			if !errors.As(err, &ee) {
+				t.Fatalf("err = %v, want *ibengine.Error", err)
+			}
+			if ee.HTTPStatus != http.StatusBadGateway || ee.Code != "upstream_error" {
+				t.Fatalf("mapped error = %+v, want HTTPStatus=502 Code=upstream_error", ee)
+			}
+		})
+	}
+}
+
 func TestForceStreamPreservesFields(t *testing.T) {
 	// Test that forceStream preserves non-model fields, adds stream=true,
 	// and rewrites model to the concrete name passed in.
@@ -106,11 +133,49 @@ func TestForceStreamPreservesFields(t *testing.T) {
 		t.Fatalf("temperature value incorrect: %f", temp)
 	}
 
+	// forceStream must also ask the upstream for a final usage chunk — an
+	// OpenAI-compatible streaming response otherwise carries no usage at
+	// all, which is why worker.meter ends up estimating token counts.
+	var streamOpts struct {
+		IncludeUsage bool `json:"include_usage"`
+	}
+	if m["stream_options"] == nil {
+		t.Fatalf("stream_options field missing")
+	}
+	if err := json.Unmarshal(m["stream_options"], &streamOpts); err != nil {
+		t.Fatalf("stream_options not valid JSON: %v", err)
+	}
+	if !streamOpts.IncludeUsage {
+		t.Fatalf("stream_options.include_usage = false, want true")
+	}
+
 	// Test that forceStream rejects non-object bodies
 	_, err = forceStream(json.RawMessage(`[1,2]`), "m")
 	var ee *ibengine.Error
 	if !errors.As(err, &ee) || ee.HTTPStatus != 400 {
 		t.Fatalf("expected bad_request error for non-object body, got: %v", err)
+	}
+}
+
+// TestForceStreamPreservesCallerStreamOptions ensures forceStream does not
+// clobber a caller-supplied stream_options (e.g. one that already set
+// include_usage to a specific value, or included other fields) with its own.
+func TestForceStreamPreservesCallerStreamOptions(t *testing.T) {
+	body := json.RawMessage(`{"model":"alias","messages":[],"stream_options":{"include_usage":false,"x":1}}`)
+	result, err := forceStream(body, "m")
+	if err != nil {
+		t.Fatalf("forceStream failed: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(result, &m); err != nil {
+		t.Fatalf("result is not valid JSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(m["stream_options"], &got); err != nil {
+		t.Fatalf("stream_options not valid JSON: %v", err)
+	}
+	if got["include_usage"] != false || got["x"] != float64(1) {
+		t.Fatalf("stream_options overwritten: %+v, want caller's original preserved", got)
 	}
 }
 

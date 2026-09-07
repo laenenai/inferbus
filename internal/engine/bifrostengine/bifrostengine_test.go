@@ -3,8 +3,12 @@ package bifrostengine
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 
+	"github.com/maximhq/bifrost/core/schemas"
+
+	ibengine "github.com/infbus/infbus/internal/engine"
 	"github.com/infbus/infbus/internal/testutil"
 )
 
@@ -28,5 +32,34 @@ func TestChatStreamThroughBifrost(t *testing.T) {
 	}
 	if usage.PromptTokens != 7 || usage.CompletionTokens != 2 {
 		t.Fatalf("usage = %+v", usage)
+	}
+}
+
+// TestMapErrorDirect exercises mapError directly for the status codes it
+// special-cases, independent of whatever exact error shape the real bifrost
+// HTTP client produces for a given upstream response. mapError is called
+// directly since this test file lives in package bifrostengine.
+func TestMapErrorDirect(t *testing.T) {
+	for _, tc := range []struct {
+		status     int
+		wantCode   string
+		wantStatus int
+	}{
+		{http.StatusUnauthorized, "upstream_error", http.StatusBadGateway},
+		{http.StatusForbidden, "upstream_error", http.StatusBadGateway},
+		{http.StatusNotFound, "upstream_error", http.StatusBadGateway},
+		{http.StatusTooManyRequests, "bifrost_error", http.StatusTooManyRequests},
+		{http.StatusInternalServerError, "bifrost_error", http.StatusInternalServerError},
+	} {
+		status := tc.status
+		berr := &schemas.BifrostError{StatusCode: &status, Error: &schemas.ErrorField{Message: "boom"}}
+		err := mapError(berr)
+		ee, ok := err.(*ibengine.Error)
+		if !ok {
+			t.Fatalf("status %d: err = %v, want *ibengine.Error", status, err)
+		}
+		if ee.Code != tc.wantCode || ee.HTTPStatus != tc.wantStatus {
+			t.Fatalf("status %d: mapped = %+v, want Code=%s HTTPStatus=%d", status, ee, tc.wantCode, tc.wantStatus)
+		}
 	}
 }

@@ -42,8 +42,19 @@ func (e *Engine) post(ctx context.Context, body []byte) (*http.Response, error) 
 	if resp.StatusCode/100 != 2 {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		status := resp.StatusCode
+		// 401/403/404 from the upstream almost always mean the *worker's*
+		// engine config is wrong (bad API key, wrong base URL, wrong
+		// upstream model id) — not something the calling client did.
+		// Passing it straight through as our own 401/403/404 would
+		// misleadingly point the caller at their infbus credentials or
+		// request instead. 408/429/5xx are left as-is: those are genuine
+		// rate-limit/retry signals worth forwarding.
+		if status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusNotFound {
+			status = http.StatusBadGateway
+		}
 		return nil, &ibengine.Error{
-			Code: "upstream_error", HTTPStatus: resp.StatusCode,
+			Code: "upstream_error", HTTPStatus: status,
 			Message: fmt.Sprintf("engine returned %d: %s", resp.StatusCode, b),
 		}
 	}
@@ -100,13 +111,20 @@ func (e *Engine) ChatStream(ctx context.Context, model string, body json.RawMess
 }
 
 // forceStream sets "stream":true and rewrites "model" to the concrete
-// upstream model name on the request body.
+// upstream model name on the request body. It also asks the upstream to
+// include a final usage chunk (stream_options.include_usage) unless the
+// caller already set stream_options themselves — a plain OpenAI-compatible
+// streaming response otherwise carries no usage at all, forcing the worker
+// to report estimated (zero) token counts.
 func forceStream(body json.RawMessage, model string) ([]byte, error) {
 	m, err := decodeObject(body)
 	if err != nil {
 		return nil, err
 	}
 	m["stream"] = json.RawMessage("true")
+	if _, ok := m["stream_options"]; !ok {
+		m["stream_options"] = json.RawMessage(`{"include_usage":true}`)
+	}
 	setModel(m, model)
 	return json.Marshal(m)
 }
