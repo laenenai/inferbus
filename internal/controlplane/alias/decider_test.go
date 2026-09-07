@@ -262,6 +262,25 @@ func TestDeleteOnAlreadyDeletedIsNoOp(t *testing.T) {
 	_ = before
 }
 
+// TestSetAliasEmptyTargetRejected proves Decide rejects an empty target
+// explicitly with ErrInvalidTarget rather than letting it slip through
+// wire.Slug("") == "" — an empty-target alias would otherwise be
+// indistinguishable from "never set" under the delete no-op sentinel,
+// making it silently undeletable forever.
+func TestSetAliasEmptyTargetRejected(t *testing.T) {
+	ctx := context.Background()
+	rt := newRuntime(t)
+	stream := sid(t, "acme-gpt-4")
+
+	res, err := rt.Handle(ctx, stream, setCmd("", nil), es.Meta{})
+	if !errors.Is(err, alias.ErrInvalidTarget) {
+		t.Fatalf("set empty target: got %v, want ErrInvalidTarget", err)
+	}
+	if len(res.Events) != 0 {
+		t.Fatalf("set empty target: %d events, want 0", len(res.Events))
+	}
+}
+
 // TestSetAliasInvalidTarget proves Decide rejects a SetAlias whose target
 // is not NATS-subject-safe (wire.Slug(target) != target) with
 // ErrInvalidTarget, and that rejection produces zero events / no state

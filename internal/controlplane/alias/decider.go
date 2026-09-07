@@ -48,7 +48,10 @@ var ErrInvalidTarget = errors.New("alias: invalid target")
 // es.StreamID for this aggregate's runtime encodes scope/name some other
 // way — that composition is out of scope for this package (see task-12's
 // binding note: "StreamType constants unused outside their packages except
-// stream-id construction in runtimes").
+// stream-id construction in runtimes"). The es-lite stream-id encoding
+// itself is owned by the admin API layer (Task 10), which builds it as
+// scope + "_" + name — unambiguous because valid scopes/names never
+// contain underscores (controller ruling).
 func StreamID(scope, name string) string {
 	return scope + "/" + name
 }
@@ -64,7 +67,12 @@ var Decider = es.Decider[*controlplanev1.Alias, *controlplanev1.AliasCommand, *c
 
 		case *controlplanev1.AliasCommand_Set:
 			target := k.Set.GetTarget()
-			if wire.Slug(target) != target {
+			if target == "" || wire.Slug(target) != target {
+				// Reject empty explicitly: wire.Slug("") == "" would
+				// otherwise pass the slug check and create a live alias
+				// indistinguishable from "never set" under the delete
+				// no-op sentinel below (s.GetTarget() == ""), making it
+				// silently undeletable forever.
 				return nil, nil, ErrInvalidTarget
 			}
 			// Upsert: unconditionally emits AliasSet, whether the stream
