@@ -1,0 +1,7 @@
+worker_id: gpu-node-01
+nats_url: nats://localhost:4222
+models:
+  - name: llama3.2          # concrete model name = NATS subject token
+    engine: openai_http     # any OpenAI-compatible server (ollama, vllm, llama.cpp)
+    url: http://localhost:11434
+    max_inflight: 4
