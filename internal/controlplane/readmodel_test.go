@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -455,4 +457,526 @@ func TestPgReadStore_Integration(t *testing.T) {
 	if _, _, _, err := rs.GetOrg(ctx, orgID+"-does-not-exist"); !errors.Is(err, ErrOrgNotFound) {
 		t.Fatalf("GetOrg unknown id error = %v, want ErrOrgNotFound", err)
 	}
+
+	// --- UpsertProject round-trip (review round 2 coverage extension)
+	projectID := "proj-" + orgID
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM cp_projects WHERE id = $1`, projectID)
+	})
+	if err := rs.UpsertProject(ctx, ProjectRow{ID: projectID, Org: orgID, Name: "Prod"}); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+	_, _, projects, err = rs.GetOrg(ctx, orgID)
+	if err != nil {
+		t.Fatalf("GetOrg after UpsertProject: %v", err)
+	}
+	if want := []ProjectRow{{ID: projectID, Org: orgID, Name: "Prod"}}; !reflect.DeepEqual(projects, want) {
+		t.Fatalf("GetOrg projects after UpsertProject = %+v, want %+v", projects, want)
+	}
+	if err := rs.UpsertProject(ctx, ProjectRow{ID: projectID, Org: orgID, Name: "Prod", Archived: true}); err != nil {
+		t.Fatalf("UpsertProject archive: %v", err)
+	}
+	_, _, projects, err = rs.GetOrg(ctx, orgID)
+	if err != nil {
+		t.Fatalf("GetOrg after archive: %v", err)
+	}
+	if len(projects) != 1 || !projects[0].Archived {
+		t.Fatalf("GetOrg projects after archive = %+v, want Archived=true", projects)
+	}
+
+	// --- UpsertKey/ListKeys round-trip, INCLUDING an empty-allowlist key
+	// (Critical review finding round 2: cp_api_keys.allow is TEXT[] NOT
+	// NULL, and a nil Go []string used to be sent as a bare SQL NULL,
+	// which the column rejects — this must not error the INSERT).
+	keyID := "key-" + orgID
+	emptyAllowKeyID := "key-empty-allow-" + orgID
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM cp_api_keys WHERE id IN ($1, $2)`, keyID, emptyAllowKeyID)
+	})
+	if err := rs.UpsertKey(ctx, KeyRow{
+		ID: keyID, Org: orgID, Project: projectID, Name: "prod",
+		Allow: []string{"gpt-4", "claude-3"}, RateLimitRPM: 60,
+	}); err != nil {
+		t.Fatalf("UpsertKey: %v", err)
+	}
+	if err := rs.UpsertKey(ctx, KeyRow{
+		ID: emptyAllowKeyID, Org: orgID, Project: projectID, Name: "wide-open",
+		Allow: nil, RateLimitRPM: 0,
+	}); err != nil {
+		t.Fatalf("UpsertKey with nil/empty Allow: %v", err)
+	}
+
+	keys, err := rs.ListKeys(ctx, orgID)
+	if err != nil {
+		t.Fatalf("ListKeys: %v", err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("ListKeys = %+v, want 2 rows", keys)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].ID < keys[j].ID })
+	// keys[0] is emptyAllowKeyID ("key-empty-allow-..." < "key-<orgID>"
+	// lexicographically only if orgID doesn't start with "empty-allow-";
+	// resolve by ID explicitly instead of relying on sort order.
+	var normalKey, emptyAllowKey KeyRow
+	for _, k := range keys {
+		switch k.ID {
+		case keyID:
+			normalKey = k
+		case emptyAllowKeyID:
+			emptyAllowKey = k
+		}
+	}
+	if len(normalKey.Allow) != 2 {
+		t.Fatalf("normal key Allow = %+v, want 2 entries", normalKey.Allow)
+	}
+	if emptyAllowKey.Allow == nil {
+		t.Fatal("empty-allowlist key's Allow = nil after Pg round-trip, want non-nil empty slice")
+	}
+	if len(emptyAllowKey.Allow) != 0 {
+		t.Fatalf("empty-allowlist key's Allow = %+v, want empty", emptyAllowKey.Allow)
+	}
+
+	// --- UpsertAlias/ListAliases round-trip
+	aliasScope := "alias-scope-" + orgID
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM cp_aliases WHERE scope = $1`, aliasScope)
+	})
+	if err := rs.UpsertAlias(ctx, AliasRow{
+		Scope: aliasScope, Name: "smart", Target: "claude",
+		Params: map[string]string{"temperature": "0-2"},
+	}); err != nil {
+		t.Fatalf("UpsertAlias: %v", err)
+	}
+	aliases, err := rs.ListAliases(ctx, aliasScope)
+	if err != nil {
+		t.Fatalf("ListAliases: %v", err)
+	}
+	wantAlias := []AliasRow{{Scope: aliasScope, Name: "smart", Target: "claude", Params: map[string]string{"temperature": "0-2"}}}
+	if !reflect.DeepEqual(aliases, wantAlias) {
+		t.Fatalf("ListAliases = %+v, want %+v", aliases, wantAlias)
+	}
+	if err := rs.DeleteAlias(ctx, aliasScope, "smart"); err != nil {
+		t.Fatalf("DeleteAlias: %v", err)
+	}
+	aliases, err = rs.ListAliases(ctx, aliasScope)
+	if err != nil {
+		t.Fatalf("ListAliases after delete: %v", err)
+	}
+	if aliases == nil {
+		t.Fatal("ListAliases after delete = nil, want non-nil empty slice")
+	}
+	if len(aliases) != 0 {
+		t.Fatalf("ListAliases after delete = %+v, want empty", aliases)
+	}
+}
+
+// --- Fix round 2, item 1: non-gated unit assertion that applyApiKeyEvent
+// pins a non-nil Allow even for a key created with an empty/unset
+// allowlist. This is the fast, Postgres-independent half of the Critical
+// fix's coverage (the Postgres half lives in TestPgReadStore_Integration
+// above): it exercises the actual projector handler, not just a
+// hand-built KeyRow, so a regression in applyApiKeyEvent's own
+// nonNilStrings coercion fails this test even without CP_TEST_PG_DSN set.
+func TestSQLProjector_ApplyApiKeyEvent_EmptyAllowlistIsNonNil(t *testing.T) {
+	ctx := context.Background()
+	dsn := "file:" + t.Name() + "?mode=memory&cache=shared"
+	store, err := sqlite.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	keyRT := aggregate.NewRuntime(store, apikey.Decider, apikey.Codec())
+	keyStream, err := es.NewStreamID(apikey.StreamType, "key-empty-allow")
+	if err != nil {
+		t.Fatalf("stream id: %v", err)
+	}
+	const hash1 = "6666666666666666666666666666666666666666666666666666666666666666"
+	if _, err := keyRT.Handle(ctx, keyStream, &controlplanev1.ApiKeyCommand{
+		Kind: &controlplanev1.ApiKeyCommand_Create{Create: &controlplanev1.CreateKey{
+			Id: "key-empty-allow", Org: "acme", Project: "proj-1", Name: "wide-open",
+			Hash: hash1, RateLimitRpm: 10,
+			// Allow intentionally left unset (nil).
+		}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	envelopes, err := store.ReadAll(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("read all: %v", err)
+	}
+
+	rs := NewMemReadStore()
+	p := newSQLProjector(store, rs, newMemMarker())
+	if err := p.apply(ctx, envelopes); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	keys, err := rs.ListKeys(ctx, "acme")
+	if err != nil {
+		t.Fatalf("list keys: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("list keys = %+v, want exactly one row", keys)
+	}
+	if keys[0].Allow == nil {
+		t.Fatal("KeyRow.Allow = nil for an empty-allowlist key, want non-nil empty slice (applyApiKeyEvent contract)")
+	}
+	if len(keys[0].Allow) != 0 {
+		t.Fatalf("KeyRow.Allow = %+v, want empty", keys[0].Allow)
+	}
+}
+
+// --- Fix round 2, item 2: fail-stop test for RunSQLProjector -------------
+
+// TestRunSQLProjector_FailStop ports TestKVProjectors_FailStop's shape
+// (kvproj_test.go) to RunSQLProjector: an alias event with an
+// unparseable stream id ("badid" has neither a "g_" nor "o_..._" prefix,
+// so SplitAliasStreamID rejects it) must fail the whole run rather than
+// silently skipping the bad event and letting the marker advance past
+// it. The bad event is the only event in the store, so the failure
+// surfaces during RunSQLProjector's initial replay, before live
+// consumption ever starts.
+func TestRunSQLProjector_FailStop(t *testing.T) {
+	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	defer cancelRelay()
+	store, js := setupSQLProjTest(t, relayCtx)
+
+	rt := aggregate.NewRuntime(store, alias.Decider, alias.Codec())
+	bad, err := es.NewStreamID(alias.StreamType, "badid")
+	if err != nil {
+		t.Fatalf("stream id: %v", err)
+	}
+	if _, err := rt.Handle(context.Background(), bad, &controlplanev1.AliasCommand{
+		Kind: &controlplanev1.AliasCommand_Set{Set: &controlplanev1.SetAlias{Target: "llama"}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("set badid: %v", err)
+	}
+
+	rs := NewMemReadStore()
+	runCtx, cancelRun := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelRun()
+	runErr := RunSQLProjector(runCtx, store, js, rs)
+
+	if runErr == nil {
+		t.Fatal("RunSQLProjector returned nil, want a fail-stop error for the unparseable stream id")
+	}
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		t.Fatalf("RunSQLProjector returned %v, want the actual SplitAliasStreamID failure (a timeout/cancellation here means fail-stop did not trigger)", runErr)
+	}
+	if !strings.Contains(runErr.Error(), "missing scope prefix separator") {
+		t.Fatalf("RunSQLProjector error = %v, want it to mention the SplitAliasStreamID failure", runErr)
+	}
+
+	// The marker must not have advanced past the failed (only) event: no
+	// proj-sql-admin key should exist in CP_MARKERS at all.
+	kv, err := js.KeyValue(context.Background(), bucketMarkers)
+	if err != nil {
+		t.Fatalf("bind CP_MARKERS: %v", err)
+	}
+	if _, err := kv.Get(context.Background(), durableProjSQL); !errors.Is(err, jetstream.ErrKeyNotFound) {
+		t.Fatalf("proj-sql-admin marker present after fail-stop on the only event (err=%v), want no marker saved at all", err)
+	}
+
+	// And the ReadStore must not contain any row derived from the bad
+	// event.
+	if orgs, _ := rs.ListOrgs(context.Background()); len(orgs) != 0 {
+		t.Fatalf("orgs after fail-stop = %+v, want none", orgs)
+	}
+}
+
+// --- Fix round 2, item 3: redelivery idempotency regression test --------
+
+// countingReadStore wraps a ReadStore and counts every write-method call,
+// so a test can assert the sticky idempotency skip (apply()'s
+// "GlobalPosition <= p.pos" check) actually prevented a second round of
+// writes on redelivery — not merely that whatever writes did happen were
+// themselves idempotent (which, given this projector's Load-then-upsert
+// design, would often be true anyway and so wouldn't catch a regression
+// in the skip check itself).
+type countingReadStore struct {
+	ReadStore
+	mu     sync.Mutex
+	writes int
+}
+
+func newCountingReadStore(rs ReadStore) *countingReadStore {
+	return &countingReadStore{ReadStore: rs}
+}
+
+func (c *countingReadStore) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writes
+}
+
+func (c *countingReadStore) bump() {
+	c.mu.Lock()
+	c.writes++
+	c.mu.Unlock()
+}
+
+func (c *countingReadStore) UpsertOrg(ctx context.Context, row OrgRow) error {
+	c.bump()
+	return c.ReadStore.UpsertOrg(ctx, row)
+}
+
+func (c *countingReadStore) UpsertMember(ctx context.Context, org, sub, role string) error {
+	c.bump()
+	return c.ReadStore.UpsertMember(ctx, org, sub, role)
+}
+
+func (c *countingReadStore) RemoveMember(ctx context.Context, org, sub string) error {
+	c.bump()
+	return c.ReadStore.RemoveMember(ctx, org, sub)
+}
+
+func (c *countingReadStore) UpsertProject(ctx context.Context, row ProjectRow) error {
+	c.bump()
+	return c.ReadStore.UpsertProject(ctx, row)
+}
+
+func (c *countingReadStore) UpsertKey(ctx context.Context, row KeyRow) error {
+	c.bump()
+	return c.ReadStore.UpsertKey(ctx, row)
+}
+
+func (c *countingReadStore) UpsertAlias(ctx context.Context, row AliasRow) error {
+	c.bump()
+	return c.ReadStore.UpsertAlias(ctx, row)
+}
+
+func (c *countingReadStore) DeleteAlias(ctx context.Context, scope, name string) error {
+	c.bump()
+	return c.ReadStore.DeleteAlias(ctx, scope, name)
+}
+
+func TestSQLProjector_Handler_RedeliveryIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	dsn := "file:" + t.Name() + "?mode=memory&cache=shared"
+	store, err := sqlite.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	orgRT := aggregate.NewRuntime(store, org.Decider, org.Codec())
+	keyRT := aggregate.NewRuntime(store, apikey.Decider, apikey.Codec())
+	aliasRT := aggregate.NewRuntime(store, alias.Decider, alias.Codec())
+
+	orgStream, err := es.NewStreamID(org.StreamType, "acme")
+	if err != nil {
+		t.Fatalf("stream id: %v", err)
+	}
+	keyStream, err := es.NewStreamID(apikey.StreamType, "key-1")
+	if err != nil {
+		t.Fatalf("stream id: %v", err)
+	}
+	aliasStream, err := es.NewStreamID(alias.StreamType, "g_fast")
+	if err != nil {
+		t.Fatalf("stream id: %v", err)
+	}
+
+	if _, err := orgRT.Handle(ctx, orgStream, &controlplanev1.OrgCommand{
+		Kind: &controlplanev1.OrgCommand_Create{Create: &controlplanev1.CreateOrg{
+			Id: "acme", Name: "Acme", OwnerSub: "u1",
+		}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	const hash1 = "7777777777777777777777777777777777777777777777777777777777777777"
+	if _, err := keyRT.Handle(ctx, keyStream, &controlplanev1.ApiKeyCommand{
+		Kind: &controlplanev1.ApiKeyCommand_Create{Create: &controlplanev1.CreateKey{
+			Id: "key-1", Org: "acme", Project: "proj-1", Name: "prod",
+			Hash: hash1, Allow: []string{"gpt-4"}, RateLimitRpm: 60,
+		}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	if _, err := aliasRT.Handle(ctx, aliasStream, &controlplanev1.AliasCommand{
+		Kind: &controlplanev1.AliasCommand_Set{Set: &controlplanev1.SetAlias{Target: "llama"}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("set alias: %v", err)
+	}
+
+	envelopes, err := store.ReadAll(ctx, 0, 1000)
+	if err != nil {
+		t.Fatalf("read all: %v", err)
+	}
+	if len(envelopes) == 0 {
+		t.Fatal("no envelopes committed")
+	}
+
+	counting := newCountingReadStore(NewMemReadStore())
+	p := newSQLProjector(store, counting, newMemMarker())
+
+	if err := p.apply(ctx, envelopes); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	firstWrites := counting.count()
+	if firstWrites == 0 {
+		t.Fatal("expected write calls on the first apply, got 0")
+	}
+
+	orgsFirst, err := counting.ListOrgs(ctx)
+	if err != nil {
+		t.Fatalf("ListOrgs after first apply: %v", err)
+	}
+	keysFirst, err := counting.ListKeys(ctx, "acme")
+	if err != nil {
+		t.Fatalf("ListKeys after first apply: %v", err)
+	}
+	aliasesFirst, err := counting.ListAliases(ctx, "_global")
+	if err != nil {
+		t.Fatalf("ListAliases after first apply: %v", err)
+	}
+
+	// Redeliver the exact same batch (at-least-once semantics: this is
+	// what a NAK'd-and-retried or restarted-mid-batch delivery looks
+	// like). Every envelope's GlobalPosition is now <= p.pos, so apply()
+	// must skip all of them without touching the ReadStore again.
+	if err := p.apply(ctx, envelopes); err != nil {
+		t.Fatalf("second (redelivered) apply: %v", err)
+	}
+
+	if got := counting.count(); got != firstWrites {
+		t.Fatalf("write calls after redelivery = %d, want unchanged %d (idempotency skip should have prevented any new ReadStore writes)", got, firstWrites)
+	}
+
+	orgsSecond, err := counting.ListOrgs(ctx)
+	if err != nil {
+		t.Fatalf("ListOrgs after redelivery: %v", err)
+	}
+	keysSecond, err := counting.ListKeys(ctx, "acme")
+	if err != nil {
+		t.Fatalf("ListKeys after redelivery: %v", err)
+	}
+	aliasesSecond, err := counting.ListAliases(ctx, "_global")
+	if err != nil {
+		t.Fatalf("ListAliases after redelivery: %v", err)
+	}
+
+	if !reflect.DeepEqual(orgsFirst, orgsSecond) {
+		t.Fatalf("orgs changed after redelivery: before=%+v after=%+v", orgsFirst, orgsSecond)
+	}
+	if !reflect.DeepEqual(keysFirst, keysSecond) {
+		t.Fatalf("keys changed after redelivery: before=%+v after=%+v", keysFirst, keysSecond)
+	}
+	if !reflect.DeepEqual(aliasesFirst, aliasesSecond) {
+		t.Fatalf("aliases changed after redelivery: before=%+v after=%+v", aliasesFirst, aliasesSecond)
+	}
+}
+
+// --- Fix round 2, item 4: nil-vs-empty parity between both ReadStore
+// implementations -----------------------------------------------------
+
+// TestReadStore_EmptyResultsAreNonNil pins the nil-vs-empty-slice parity
+// ruling (fold-in minor, review round 2): Task 10's admin API will
+// JSON-serialize these results directly, and a bare `null` where an
+// empty JSON array `[]` is expected is a worse API shape — so every
+// ReadStore query method must return a non-nil (possibly zero-length)
+// slice for an empty result, never nil. Checked against MemReadStore
+// unconditionally, and against PgReadStore too when CP_TEST_PG_DSN is
+// set (both subtests exercise the same four query methods so a
+// divergence between the two implementations is caught directly, not
+// just each implementation's own self-consistency).
+func TestReadStore_EmptyResultsAreNonNil(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("mem", func(t *testing.T) {
+		rs := NewMemReadStore()
+
+		orgs, err := rs.ListOrgs(ctx)
+		if err != nil {
+			t.Fatalf("ListOrgs: %v", err)
+		}
+		if orgs == nil {
+			t.Fatal("ListOrgs on an empty store = nil, want non-nil empty slice")
+		}
+
+		if err := rs.UpsertOrg(ctx, OrgRow{ID: "empty-org", Name: "Empty"}); err != nil {
+			t.Fatalf("UpsertOrg: %v", err)
+		}
+		_, members, projects, err := rs.GetOrg(ctx, "empty-org")
+		if err != nil {
+			t.Fatalf("GetOrg: %v", err)
+		}
+		if members == nil {
+			t.Fatal("GetOrg members = nil for an org with none, want non-nil empty slice")
+		}
+		if projects == nil {
+			t.Fatal("GetOrg projects = nil for an org with none, want non-nil empty slice")
+		}
+
+		keys, err := rs.ListKeys(ctx, "empty-org")
+		if err != nil {
+			t.Fatalf("ListKeys: %v", err)
+		}
+		if keys == nil {
+			t.Fatal("ListKeys for an org with no keys = nil, want non-nil empty slice")
+		}
+
+		aliases, err := rs.ListAliases(ctx, "_global")
+		if err != nil {
+			t.Fatalf("ListAliases: %v", err)
+		}
+		if aliases == nil {
+			t.Fatal("ListAliases for an empty scope = nil, want non-nil empty slice")
+		}
+	})
+
+	t.Run("pg", func(t *testing.T) {
+		dsn := os.Getenv("CP_TEST_PG_DSN")
+		if dsn == "" {
+			t.Skip("CP_TEST_PG_DSN not set; skipping Postgres half of the nil-vs-empty parity check")
+		}
+
+		pool, err := pgxpool.New(ctx, dsn)
+		if err != nil {
+			t.Fatalf("pgxpool.New: %v", err)
+		}
+		t.Cleanup(pool.Close)
+
+		rs, err := NewPgReadStore(pool)
+		if err != nil {
+			t.Fatalf("NewPgReadStore: %v", err)
+		}
+
+		orgID := "pg-empty-parity-" + t.Name()
+		t.Cleanup(func() {
+			_, _ = pool.Exec(context.Background(), `DELETE FROM cp_org_members WHERE org = $1`, orgID)
+			_, _ = pool.Exec(context.Background(), `DELETE FROM cp_orgs WHERE id = $1`, orgID)
+		})
+
+		if err := rs.UpsertOrg(ctx, OrgRow{ID: orgID, Name: "Empty"}); err != nil {
+			t.Fatalf("UpsertOrg: %v", err)
+		}
+		_, members, projects, err := rs.GetOrg(ctx, orgID)
+		if err != nil {
+			t.Fatalf("GetOrg: %v", err)
+		}
+		if members == nil {
+			t.Fatal("GetOrg members = nil for an org with none, want non-nil empty slice")
+		}
+		if projects == nil {
+			t.Fatal("GetOrg projects = nil for an org with none, want non-nil empty slice")
+		}
+
+		keys, err := rs.ListKeys(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListKeys: %v", err)
+		}
+		if keys == nil {
+			t.Fatal("ListKeys for an org with no keys = nil, want non-nil empty slice")
+		}
+
+		aliases, err := rs.ListAliases(ctx, orgID+"-scope-with-nothing")
+		if err != nil {
+			t.Fatalf("ListAliases: %v", err)
+		}
+		if aliases == nil {
+			t.Fatal("ListAliases for an empty scope = nil, want non-nil empty slice")
+		}
+	})
 }

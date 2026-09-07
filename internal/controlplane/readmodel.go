@@ -195,8 +195,11 @@ func (s *MemReadStore) UpsertKey(_ context.Context, row KeyRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Defensive copy: Allow is caller-owned; don't let a later mutation
-	// of the caller's slice reach back into the stored row.
-	row.Allow = append([]string(nil), row.Allow...)
+	// of the caller's slice reach back into the stored row. Also coerce
+	// nil -> non-nil at write time (nonNilStrings) so a caller storing an
+	// unset/empty allowlist doesn't leave a nil in the map for ListKeys
+	// to hand back later.
+	row.Allow = nonNilStrings(append([]string(nil), row.Allow...))
 	s.keys[row.ID] = row
 	return nil
 }
@@ -253,12 +256,14 @@ func (s *MemReadStore) GetOrg(_ context.Context, id string) (OrgRow, []MemberRow
 func (s *MemReadStore) ListKeys(_ context.Context, orgID string) ([]KeyRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var rows []KeyRow
+	// Non-nil even when empty (fold-in ruling, review round 2): Task 10
+	// JSON-serializes this directly, and "[]" beats "null".
+	rows := make([]KeyRow, 0, len(s.keys))
 	for _, row := range s.keys {
 		if row.Org != orgID {
 			continue
 		}
-		row.Allow = append([]string(nil), row.Allow...)
+		row.Allow = nonNilStrings(append([]string(nil), row.Allow...))
 		rows = append(rows, row)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
@@ -268,7 +273,8 @@ func (s *MemReadStore) ListKeys(_ context.Context, orgID string) ([]KeyRow, erro
 func (s *MemReadStore) ListAliases(_ context.Context, scope string) ([]AliasRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var rows []AliasRow
+	// Non-nil even when empty — see ListKeys.
+	rows := make([]AliasRow, 0, len(s.aliases))
 	for _, row := range s.aliases {
 		if row.Scope != scope {
 			continue
@@ -278,6 +284,19 @@ func (s *MemReadStore) ListAliases(_ context.Context, scope string) ([]AliasRow,
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	return rows, nil
+}
+
+// nonNilStrings coerces a nil slice to a non-nil, zero-length one. Used
+// wherever a []string crosses either a wire boundary (Postgres TEXT[] is
+// NOT NULL — a nil Go slice becomes a SQL NULL parameter, which the
+// column rejects outright, Critical review finding round 2) or a JSON
+// boundary (Task 10's admin API — "[]" beats "null" for an empty
+// allowlist, fold-in minor).
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 func copyStringMap(m map[string]string) map[string]string {
@@ -398,6 +417,14 @@ func (s *PgReadStore) UpsertProject(ctx context.Context, row ProjectRow) error {
 }
 
 func (s *PgReadStore) UpsertKey(ctx context.Context, row KeyRow) error {
+	// Critical fix (review round 2): cp_api_keys.allow is TEXT[] NOT
+	// NULL. pgx sends a nil []string as a SQL NULL parameter, which the
+	// column rejects outright — an ordinary key with an empty allowlist
+	// (Allow == nil, e.g. "allow everything") would permanently fail the
+	// INSERT and fail-stop the whole projector. Coerce to a non-nil,
+	// zero-length slice first; nonNilStrings is shared with MemReadStore
+	// so both impls apply the same nil-vs-empty rule.
+	allow := nonNilStrings(row.Allow)
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO cp_api_keys (id, org, project, name, allow, rate_limit_rpm, disabled)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -405,7 +432,7 @@ func (s *PgReadStore) UpsertKey(ctx context.Context, row KeyRow) error {
 			org = EXCLUDED.org, project = EXCLUDED.project, name = EXCLUDED.name,
 			allow = EXCLUDED.allow, rate_limit_rpm = EXCLUDED.rate_limit_rpm,
 			disabled = EXCLUDED.disabled`,
-		row.ID, row.Org, row.Project, row.Name, row.Allow, row.RateLimitRPM, row.Disabled)
+		row.ID, row.Org, row.Project, row.Name, allow, row.RateLimitRPM, row.Disabled)
 	if err != nil {
 		return fmt.Errorf("controlplane: pg read store: upsert key %q: %w", row.ID, err)
 	}
@@ -442,7 +469,10 @@ func (s *PgReadStore) ListOrgs(ctx context.Context) ([]OrgRow, error) {
 	}
 	defer rows.Close()
 
-	var out []OrgRow
+	// Non-nil even when empty (fold-in ruling, review round 2): Task 10
+	// JSON-serializes this directly, and "[]" beats "null" — matches
+	// MemReadStore's ListOrgs, which is non-nil via make(..., 0, ...).
+	out := []OrgRow{}
 	for rows.Next() {
 		var row OrgRow
 		if err := rows.Scan(&row.ID, &row.Name); err != nil {
@@ -470,7 +500,8 @@ func (s *PgReadStore) GetOrg(ctx context.Context, id string) (OrgRow, []MemberRo
 	if err != nil {
 		return OrgRow{}, nil, nil, fmt.Errorf("controlplane: pg read store: get org %q: members: %w", id, err)
 	}
-	var members []MemberRow
+	// Non-nil even when empty — see ListOrgs.
+	members := []MemberRow{}
 	for memberRows.Next() {
 		var m MemberRow
 		if err := memberRows.Scan(&m.Sub, &m.Role); err != nil {
@@ -488,7 +519,8 @@ func (s *PgReadStore) GetOrg(ctx context.Context, id string) (OrgRow, []MemberRo
 	if err != nil {
 		return OrgRow{}, nil, nil, fmt.Errorf("controlplane: pg read store: get org %q: projects: %w", id, err)
 	}
-	var projects []ProjectRow
+	// Non-nil even when empty — see ListOrgs.
+	projects := []ProjectRow{}
 	for projRows.Next() {
 		var p ProjectRow
 		if err := projRows.Scan(&p.ID, &p.Org, &p.Name, &p.Archived); err != nil {
@@ -514,12 +546,14 @@ func (s *PgReadStore) ListKeys(ctx context.Context, org string) ([]KeyRow, error
 	}
 	defer rows.Close()
 
-	var out []KeyRow
+	// Non-nil even when empty — see ListOrgs.
+	out := []KeyRow{}
 	for rows.Next() {
 		var row KeyRow
 		if err := rows.Scan(&row.ID, &row.Org, &row.Project, &row.Name, &row.Allow, &row.RateLimitRPM, &row.Disabled); err != nil {
 			return nil, fmt.Errorf("controlplane: pg read store: list keys %q: scan: %w", org, err)
 		}
+		row.Allow = nonNilStrings(row.Allow)
 		out = append(out, row)
 	}
 	if err := rows.Err(); err != nil {
@@ -535,7 +569,8 @@ func (s *PgReadStore) ListAliases(ctx context.Context, scope string) ([]AliasRow
 	}
 	defer rows.Close()
 
-	var out []AliasRow
+	// Non-nil even when empty — see ListOrgs.
+	out := []AliasRow{}
 	for rows.Next() {
 		var row AliasRow
 		var params []byte
@@ -723,11 +758,18 @@ func (p *sqlProjector) applyApiKeyEvent(ctx context.Context, e es.Envelope) erro
 		return fmt.Errorf("controlplane: sql projector: load apikey %q: %w", e.StreamID.ID, err)
 	}
 	return p.rs.UpsertKey(ctx, KeyRow{
-		ID:           e.StreamID.ID,
-		Org:          state.GetOrg(),
-		Project:      state.GetProject(),
-		Name:         state.GetName(),
-		Allow:        append([]string(nil), state.GetAllow()...),
+		ID:      e.StreamID.ID,
+		Org:     state.GetOrg(),
+		Project: state.GetProject(),
+		Name:    state.GetName(),
+		// nonNilStrings: an empty allowlist (state.GetAllow() == nil,
+		// e.g. a key created with no Allow at all) must still produce a
+		// non-nil KeyRow.Allow — append([]string(nil)) with zero elements
+		// to append returns nil unchanged, which is exactly the shape
+		// that broke PgReadStore.UpsertKey's NOT NULL TEXT[] column
+		// (review round 2, Critical). Pinning it here, at the source,
+		// means every ReadStore impl receives an already-non-nil slice.
+		Allow:        nonNilStrings(append([]string(nil), state.GetAllow()...)),
 		RateLimitRPM: int(state.GetRateLimitRpm()),
 		Disabled:     state.GetDisabled(),
 	})
