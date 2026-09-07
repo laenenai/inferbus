@@ -102,7 +102,14 @@ var Decider = es.Decider[*controlplanev1.Org, *controlplanev1.OrgCommand, *contr
 				return nil, nil, ErrNotFound
 			}
 			sub := k.RemoveMember.GetSub()
-			if role, ok := s.GetMembers()[sub]; ok && role == "owner" && ownerCount(s) <= 1 {
+			role, ok := s.GetMembers()[sub]
+			if !ok {
+				// Not a member: nothing to remove. A no-op command emits
+				// zero events and no error — the log is an audit trail,
+				// never a place for spurious no-op events.
+				return nil, nil, nil
+			}
+			if role == "owner" && ownerCount(s) <= 1 {
 				return nil, nil, ErrLastOwner
 			}
 			return []*controlplanev1.OrgEvent{
@@ -125,8 +132,13 @@ var Decider = es.Decider[*controlplanev1.Org, *controlplanev1.OrgCommand, *contr
 				return nil, nil, ErrNotFound
 			}
 			id := k.ArchiveProject.GetId()
-			if _, ok := s.GetProjects()[id]; !ok {
+			proj, ok := s.GetProjects()[id]
+			if !ok {
 				return nil, nil, ErrNoSuchProject
+			}
+			if proj.GetArchived() {
+				// Already archived: no-op, zero events, no error.
+				return nil, nil, nil
 			}
 			return []*controlplanev1.OrgEvent{
 				wrap(&controlplanev1.ProjectArchived{Id: id}),

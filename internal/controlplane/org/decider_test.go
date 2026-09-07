@@ -183,6 +183,106 @@ func TestProjects(t *testing.T) {
 	if _, err := rt.Handle(ctx, stream, archiveProjectCmd("no-such-project"), es.Meta{}); !errors.Is(err, org.ErrNoSuchProject) {
 		t.Fatalf("archive unknown project: got %v, want ErrNoSuchProject", err)
 	}
+
+	// Archiving an already-archived project is a true no-op: zero events,
+	// no error, no version bump — never a spurious second ProjectArchived.
+	res, err = rt.Handle(ctx, stream, archiveProjectCmd("proj-1"), es.Meta{})
+	if err != nil {
+		t.Fatalf("archive already-archived project: %v", err)
+	}
+	if len(res.Events) != 0 {
+		t.Fatalf("archive already-archived project: %d events, want 0", len(res.Events))
+	}
+	if res.FromVersion != res.ToVersion {
+		t.Fatalf("archive already-archived project: FromVersion=%d ToVersion=%d, want equal (no append)", res.FromVersion, res.ToVersion)
+	}
+	if !res.State.GetProjects()["proj-1"].GetArchived() {
+		t.Fatalf("project after redundant archive: archived=false, want true")
+	}
+}
+
+// TestRenameAfterCreate exercises the OrgRenamed success path end to end:
+// Decide accepting the rename, Evolve applying it, and the codec round-trip
+// through the store — all three are only proven together by a fresh Load
+// after a commit.
+func TestRenameAfterCreate(t *testing.T) {
+	ctx := context.Background()
+	rt := newRuntime(t)
+	stream := sid(t, "acme")
+
+	if _, err := rt.Handle(ctx, stream, createCmd("acme", "Acme Inc", "sub-owner"), es.Meta{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	res, err := rt.Handle(ctx, stream, renameCmd("Acme Corp"), es.Meta{})
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if res.State.GetName() != "Acme Corp" {
+		t.Fatalf("state.Name after rename = %q, want %q", res.State.GetName(), "Acme Corp")
+	}
+
+	// Reload from the log (fresh fold, forcing the codec's Decode path)
+	// to prove the rename survives encode/decode, not just the in-memory
+	// Evolve result from Handle.
+	state, version, err := rt.Load(ctx, stream)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if state.GetName() != "Acme Corp" {
+		t.Fatalf("reloaded name = %q, want %q", state.GetName(), "Acme Corp")
+	}
+	if version != 2 {
+		t.Fatalf("reloaded version = %d, want 2", version)
+	}
+}
+
+// TestRemoveNonMemberIsNoOp asserts the controller's binding no-op ruling:
+// removing a sub that was never a member emits zero events and no error,
+// leaves the folded state unchanged, and stays event-free no matter how
+// many times it's repeated.
+func TestRemoveNonMemberIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	rt := newRuntime(t)
+	stream := sid(t, "acme")
+
+	if _, err := rt.Handle(ctx, stream, createCmd("acme", "Acme Inc", "sub-owner"), es.Meta{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	before, versionBefore, err := rt.Load(ctx, stream)
+	if err != nil {
+		t.Fatalf("load before: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		res, err := rt.Handle(ctx, stream, removeMemberCmd("sub-never-added"), es.Meta{})
+		if err != nil {
+			t.Fatalf("remove non-member (attempt %d): %v", i, err)
+		}
+		if len(res.Events) != 0 {
+			t.Fatalf("remove non-member (attempt %d): %d events, want 0", i, len(res.Events))
+		}
+		if res.FromVersion != res.ToVersion {
+			t.Fatalf("remove non-member (attempt %d): FromVersion=%d ToVersion=%d, want equal (no append)", i, res.FromVersion, res.ToVersion)
+		}
+	}
+
+	after, versionAfter, err := rt.Load(ctx, stream)
+	if err != nil {
+		t.Fatalf("load after: %v", err)
+	}
+	if versionAfter != versionBefore {
+		t.Fatalf("version after no-op removes = %d, want unchanged %d", versionAfter, versionBefore)
+	}
+	if len(after.GetMembers()) != len(before.GetMembers()) {
+		t.Fatalf("members after no-op removes = %v, want unchanged %v", after.GetMembers(), before.GetMembers())
+	}
+	for sub, role := range before.GetMembers() {
+		if after.GetMembers()[sub] != role {
+			t.Fatalf("members[%q] after no-op removes = %q, want unchanged %q", sub, after.GetMembers()[sub], role)
+		}
+	}
 }
 
 // TestFullFold runs the whole command sequence from the brief and confirms
