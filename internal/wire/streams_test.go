@@ -38,6 +38,9 @@ func TestEnsureStreamsIdempotent(t *testing.T) {
 	if cfg.Storage != jetstream.FileStorage {
 		t.Fatalf("INFERENCE Storage = %v, want FileStorage", cfg.Storage)
 	}
+	if cfg.MaxAge != 30*time.Minute {
+		t.Fatalf("INFERENCE MaxAge = %v, want 30*time.Minute", cfg.MaxAge)
+	}
 
 	// Check METERING stream
 	info, err = js.Stream(ctx, wire.StreamMetering)

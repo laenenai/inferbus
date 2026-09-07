@@ -154,6 +154,83 @@ func TestNonStreamEndToEnd(t *testing.T) {
 	}
 }
 
+// TestNoWorkerConsumerDeadlineCleansUpQueuedMessage covers I11: a request
+// for a model with no worker consumer must still eventually 504 (its own
+// RequestTimeout is the backstop), and the gateway must delete the queued
+// message rather than leaving it in the INFERENCE stream until the stream's
+// MaxAge eventually reaps it.
+func TestNoWorkerConsumerDeadlineCleansUpQueuedMessage(t *testing.T) {
+	nc, js := testutil.RunNATS(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	// A worker that only serves "llama-70b" — nothing consumes the
+	// "orphan-model" subject this test's alias resolves to.
+	w := worker.New(nc, js, map[string]ibengine.Engine{"llama-70b": &testutil.FakeEngine{}}, worker.Config{
+		WorkerID: "w1",
+		Models:   []worker.ModelConfig{{Name: "llama-70b", MaxInflight: 2}},
+	})
+	ready := make(chan struct{})
+	go func() { _ = w.RunReady(ctx, ready) }()
+	<-ready
+	g := gateway.New(nc, js, gateway.Config{
+		RequestTimeout: 300 * time.Millisecond,
+		Keys: []gateway.KeyConfig{{
+			Key: "ib_test_123", Name: "t", Org: "acme", Project: "prod",
+			Allow: []string{"orphan"},
+		}},
+		Aliases: map[string]string{"orphan": "orphan-model"},
+	})
+	srv := httptest.NewServer(g.Routes())
+	t.Cleanup(srv.Close)
+
+	resp := post(t, srv, "ib_test_123", `{"model":"orphan","messages":[{"role":"user","content":"hi"}]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504", resp.StatusCode)
+	}
+
+	stream, err := js.Stream(context.Background(), wire.StreamInference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := wire.ReqSubject("orphan-model")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := stream.GetLastMsgForSubject(context.Background(), subject)
+		if err != nil {
+			break // message deleted, as expected
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("queued message was never cleaned up")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestOversizedBody413(t *testing.T) {
+	srv, _ := startStack(t, &testutil.FakeEngine{})
+	// Body must exceed the gateway's 1 MiB cap. Pad with a valid JSON
+	// string field so a naive implementation that reads it all wouldn't
+	// itself fail earlier for an unrelated reason.
+	big := `{"model":"smart","messages":[],"pad":"` + strings.Repeat("x", 2<<20) + `"}`
+	resp := post(t, srv, "ib_test_123", big)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+	var out struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Error.Type != "request_too_large" {
+		t.Fatalf("error.type = %q, want request_too_large", out.Error.Type)
+	}
+}
+
 func TestUpstreamErrorMapsToStatus(t *testing.T) {
 	srv, _ := startStack(t, &testutil.FakeEngine{
 		Chunks: []string{`{"c":0}`, `{"c":1}`},
@@ -163,6 +240,50 @@ func TestUpstreamErrorMapsToStatus(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+// TestStreamMidStreamErrorEmitsSSEErrorEvent covers a worker error that
+// arrives after the gateway has already written SSE headers and relayed at
+// least one chunk. Before this fix the connection just ended with no [DONE]
+// and no indication of failure; clients reading a standard SSE stream have
+// no way to distinguish that from a clean, empty completion. The gateway
+// must instead emit an SSE "error" data event, then [DONE], before closing.
+func TestStreamMidStreamErrorEmitsSSEErrorEvent(t *testing.T) {
+	eng := &testutil.FakeEngine{
+		Chunks: []string{`{"choices":[{"delta":{"content":"he"}}]}`, `{"choices":[{"delta":{"content":"y"}}]}`},
+		Err:    &ibengine.Error{Code: "upstream_error", Message: "boom", HTTPStatus: 502},
+	}
+	srv, _ := startStack(t, eng)
+	resp := post(t, srv, "ib_test_123", `{"model":"smart","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var lines []string
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		if strings.HasPrefix(sc.Text(), "data: ") {
+			lines = append(lines, strings.TrimPrefix(sc.Text(), "data: "))
+		}
+	}
+	if len(lines) < 2 {
+		t.Fatalf("expected at least an error event and [DONE], got %v", lines)
+	}
+	if lines[len(lines)-1] != "[DONE]" {
+		t.Fatalf("last line = %q, want [DONE]", lines[len(lines)-1])
+	}
+	var errEvt struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-2]), &errEvt); err != nil {
+		t.Fatalf("error event not valid JSON: %v (%q)", err, lines[len(lines)-2])
+	}
+	if errEvt.Error.Type != "upstream_error" || errEvt.Error.Message != "boom" {
+		t.Fatalf("error event = %+v", errEvt)
 	}
 }
 

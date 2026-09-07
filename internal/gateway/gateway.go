@@ -102,8 +102,13 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		oaiError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			oaiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the 1 MiB limit")
+			return
+		}
 		oaiError(w, http.StatusBadRequest, "invalid_request_error", "unreadable body")
 		return
 	}
@@ -221,13 +226,33 @@ func (g *Gateway) streamOut(ctx context.Context, w http.ResponseWriter, l *relay
 		if errors.As(err, &re) {
 			if !wroteHeader {
 				oaiError(w, re.Err.HTTPStatus, re.Err.Code, re.Err.Message)
-			} // mid-stream errors: connection just ends without [DONE]
+				return
+			}
+			// Headers (and possibly chunks) are already on the wire, so an
+			// HTTP status can no longer communicate the failure — emit an
+			// SSE error event followed by [DONE] so the client can tell a
+			// genuine failure apart from a clean, silent end of stream.
+			b, _ := json.Marshal(map[string]any{
+				"error": map[string]any{"message": re.Err.Message, "type": re.Err.Code},
+			})
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			if fl != nil {
+				fl.Flush()
+			}
 			return
 		}
 		if err != nil {
-			if clientDisconnected(ctx) {
-				g.cleanupDisconnected(reqID, seq)
-			} else if !wroteHeader {
+			// Either the client hung up (ctx died) or the gateway's own
+			// per-request deadline fired with no worker ever answering
+			// (dctx died, ctx alive). Either way no worker is (or ever
+			// will be) usefully serving this request, so clean it up: a
+			// still-queued message deleted, a cancel published for a
+			// worker that already picked it up. Without this, a model
+			// with no consumer just leaves the message queued until the
+			// stream's MaxAge eventually reaps it.
+			g.cleanupDisconnected(reqID, seq)
+			if !clientDisconnected(ctx) && !wroteHeader {
 				oaiError(w, http.StatusGatewayTimeout, "timeout", "no response from worker")
 			}
 			return
@@ -257,9 +282,11 @@ func (g *Gateway) resultOut(ctx context.Context, w http.ResponseWriter, l *relay
 			oaiError(w, http.StatusBadGateway, "protocol_error", "stream ended without a result")
 			return
 		case err != nil:
-			if clientDisconnected(ctx) {
-				g.cleanupDisconnected(reqID, seq)
-			} else {
+			// Same reasoning as streamOut's equivalent branch: clean up
+			// whether it was the client that disappeared or the gateway's
+			// own deadline firing on a request no worker will ever serve.
+			g.cleanupDisconnected(reqID, seq)
+			if !clientDisconnected(ctx) {
 				oaiError(w, http.StatusGatewayTimeout, "timeout", "no response from worker")
 			}
 			return
