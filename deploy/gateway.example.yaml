@@ -8,3 +8,14 @@ keys:
     allow: [fast]
 aliases:
   fast: llama3.2
+# iam:
+#   mode: kv  # default is "static" (the keys/aliases above). "kv" instead
+#             # reads keys and aliases live from the control plane's
+#             # ALIASES/KEYS NATS KV buckets. In kv mode the keys: list
+#             # above must be removed entirely — the gateway refuses to
+#             # start if both are set, rather than silently ignoring one.
+#             # The HTTP server binds immediately either way: if the
+#             # control plane hasn't started yet (or the buckets haven't
+#             # appeared), GET /readyz and every authenticated request
+#             # answer 503 (not 401) until the first KV scan completes,
+#             # then the gateway serves normally.

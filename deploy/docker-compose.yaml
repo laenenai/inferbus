@@ -46,3 +46,12 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       nats: { condition: service_healthy }
+  controlplane:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["controlplane", "-config", "/etc/inferbus/controlplane.yaml"]
+    environment: { INFERBUS_NATS_URL: nats://nats:4222 }
+    volumes: ["./controlplane.example.yaml:/etc/inferbus/controlplane.yaml:ro"]
+    ports: ["8081:8081"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }

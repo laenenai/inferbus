@@ -117,8 +117,13 @@ never valid on the data plane.
   positions. At-least-once delivery is the contract.
 - **Startup & rebuild:** on boot each projector runs `projection.Replay`
   against the store's `ReadAll` from its marker, then switches to live
-  `Consume`. `resync` clears a KV bucket and replays from position 0 — safe
-  at any time because KV is never authoritative.
+  `Consume`. `resync` clears a KV bucket and replays from position 0 — this
+  is an offline maintenance operation, not something safe to trigger
+  casually: the caller must stop the running projectors first (the admin
+  handler does this itself), and while it runs the ALIASES/KEYS buckets do
+  not reflect a consistent snapshot, so a cold gateway (no cached KV watch
+  yet) sees brief auth/alias unavailability until the rebuild completes; a
+  warm gateway keeps serving its last good snapshot in the meantime.
 
 ## 5. Gateway integration
 

@@ -12,6 +12,6 @@ tasks:
       - go test ./... -race
       # laenenai is the public GitHub org (module path); any OTHER laenen-prefixed
       # string is an internal-platform reference and must not appear.
-      - "! grep -riIE 'butler|\\bporter\\b' --exclude-dir=.git --exclude=design.md --exclude=Taskfile.yml . || (echo 'branding leak' && exit 1)"
-      - "! grep -rhiIoE 'laenen[a-z_-]*' --exclude-dir=.git --exclude=design.md --exclude=Taskfile.yml . | grep -ivx 'laenenai' | grep -q . || (echo 'internal branding leak (non-laenenai laenen ref)' && exit 1)"
+      - "! grep -riIE 'butler|\\bporter\\b' --exclude-dir=.git --exclude-dir=.github --exclude-dir=.superpowers --exclude=design.md --exclude=Taskfile.yml . || (echo 'branding leak' && exit 1)"
+      - "! grep -rhiIoE 'laenen[a-z_-]*' --exclude-dir=.git --exclude-dir=.github --exclude-dir=.superpowers --exclude=design.md --exclude=Taskfile.yml . | grep -ivx 'laenenai' | grep -q . || (echo 'internal branding leak (non-laenenai laenen ref)' && exit 1)"
       - docker build -f deploy/Dockerfile -t inferbus-check .

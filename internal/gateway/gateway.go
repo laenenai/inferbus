@@ -5,7 +5,6 @@ package gateway
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,13 +26,30 @@ type Gateway struct {
 	nc  *nats.Conn
 	js  jetstream.JetStream
 	cfg Config
+	iam iamProvider
 }
 
+// New builds a Gateway in the default STATIC IAM mode: key auth and alias
+// resolution both come from cfg's own Keys/Aliases, exactly as before
+// Task 11 introduced the iamProvider seam. Every pre-existing gateway test
+// keeps using this constructor unchanged.
 func New(nc *nats.Conn, js jetstream.JetStream, cfg Config) *Gateway {
+	return newGateway(nc, js, cfg, newStaticIAM(cfg))
+}
+
+// NewWithIAM builds a Gateway backed by an explicit iamProvider — used for
+// `iam.mode: kv` (cmd/inferbus/roles.go constructs a *KVIAM and passes it
+// here) and by tests that want to exercise KVIAM directly through the
+// gateway's HTTP surface.
+func NewWithIAM(nc *nats.Conn, js jetstream.JetStream, cfg Config, iam iamProvider) *Gateway {
+	return newGateway(nc, js, cfg, iam)
+}
+
+func newGateway(nc *nats.Conn, js jetstream.JetStream, cfg Config, iam iamProvider) *Gateway {
 	if cfg.RequestTimeout == 0 {
 		cfg.RequestTimeout = 5 * time.Minute
 	}
-	return &Gateway{nc: nc, js: js, cfg: cfg}
+	return &Gateway{nc: nc, js: js, cfg: cfg, iam: iam}
 }
 
 func (g *Gateway) Routes() *http.ServeMux {
@@ -41,7 +57,64 @@ func (g *Gateway) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/chat/completions", g.chatCompletions)
 	mux.HandleFunc("GET /v1/models", g.models)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /readyz", g.readyz)
 	return mux
+}
+
+// readinessChecker is satisfied by an iamProvider that has a startup
+// window during which it isn't yet safe to serve requests — currently
+// only *KVIAM (review ruling I6: NewKVIAM returns immediately rather than
+// blocking, so there is a real gap between "gateway process started" and
+// "KVIAM has a real snapshot of the KEYS/ALIASES buckets"). staticIAM
+// does not implement this interface at all, so isReady()'s type
+// assertion simply fails for it and the gateway is always considered
+// ready in static mode — there is no startup window to speak of, the
+// static config is already fully loaded by the time Gateway exists.
+type readinessChecker interface {
+	Ready() <-chan struct{}
+}
+
+// isReady reports whether g.iam is either not a readinessChecker at all
+// (static mode) or has completed its startup Ready() signal (kv mode,
+// once both buckets have their first snapshot).
+func (g *Gateway) isReady() bool {
+	rc, ok := g.iam.(readinessChecker)
+	if !ok {
+		return true
+	}
+	select {
+	case <-rc.Ready():
+		return true
+	default:
+		return false
+	}
+}
+
+// readyz backs GET /readyz: 200 once the gateway is able to make real
+// auth/allowlist decisions, 503 while a kv-mode KVIAM is still doing its
+// first scan of the KEYS/ALIASES buckets (review ruling I6).
+func (g *Gateway) readyz(w http.ResponseWriter, _ *http.Request) {
+	if g.isReady() {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "OK")
+		return
+	}
+	w.WriteHeader(http.StatusServiceUnavailable)
+	fmt.Fprint(w, "unhealthy: kv iam not ready")
+}
+
+// checkReady writes a 503 and returns false if the gateway can't yet make
+// a real auth decision (review ruling I6) — callers that authenticate
+// (models, chatCompletions) must check this first, since answering 401 to
+// every request during a kv-mode startup window would look identical to
+// "every key was revoked" from the caller's side, which is a much worse
+// failure mode than a transient 503.
+func (g *Gateway) checkReady(w http.ResponseWriter) bool {
+	if g.isReady() {
+		return true
+	}
+	oaiError(w, http.StatusServiceUnavailable, "service_unavailable", "gateway is still loading key/alias state, try again shortly")
+	return false
 }
 
 func oaiError(w http.ResponseWriter, status int, typ, msg string) {
@@ -58,16 +131,13 @@ func (g *Gateway) authenticate(r *http.Request) (KeyConfig, bool) {
 	if !strings.HasPrefix(auth, prefix) || len(auth) <= len(prefix) {
 		return KeyConfig{}, false
 	}
-	presented := []byte(auth[len(prefix):])
-	for _, k := range g.cfg.Keys {
-		if subtle.ConstantTimeCompare(presented, []byte(k.Key)) == 1 {
-			return k, true
-		}
-	}
-	return KeyConfig{}, false
+	return g.iam.AuthenticateKey(auth[len(prefix):])
 }
 
 func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
+	if !g.checkReady(w) {
+		return
+	}
 	key, ok := g.authenticate(r)
 	if !ok {
 		oaiError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
@@ -82,7 +152,7 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 		Data   []model `json:"data"`
 	}{Object: "list", Data: []model{}}
 	for _, alias := range key.Allow {
-		if _, exists := g.cfg.Aliases[alias]; exists {
+		if _, exists := g.iam.ResolveAlias(key.Org, alias); exists {
 			out.Data = append(out.Data, model{ID: alias, Object: "model"})
 		}
 	}
@@ -97,6 +167,9 @@ func newReqID() string {
 }
 
 func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	if !g.checkReady(w) {
+		return
+	}
 	key, ok := g.authenticate(r)
 	if !ok {
 		oaiError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
@@ -120,7 +193,7 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		oaiError(w, http.StatusBadRequest, "invalid_request_error", "body must be a JSON object with a model field")
 		return
 	}
-	target, exists := g.cfg.Aliases[req.Model]
+	target, exists := g.iam.ResolveAlias(key.Org, req.Model)
 	if !exists {
 		oaiError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("unknown model alias %q", req.Model))
 		return

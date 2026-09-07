@@ -14,6 +14,9 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/laenenai/es-lite/postgres"
+
+	"github.com/laenenai/inferbus/internal/controlplane"
 	"github.com/laenenai/inferbus/internal/engine"
 	"github.com/laenenai/inferbus/internal/engine/bifrostengine"
 	"github.com/laenenai/inferbus/internal/engine/openaihttp"
@@ -84,6 +87,22 @@ func runGateway(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, "gateway:", err)
 		return 1
 	}
+	// I3 review ruling: a non-empty static `keys:` list alongside
+	// `iam.mode: kv` is a hard startup error, not a silently-ignored
+	// leftover — kv mode never consults cfg.Keys at all (KVIAM is the sole
+	// source of truth), so a config with both looks like the operator
+	// believes those static keys still work when they never will. Fail
+	// loudly and fast (before ever touching NATS) instead of an auth
+	// surface that silently downgrades to "kv only" without the operator
+	// noticing.
+	if cfg.IAM.Mode == "kv" && len(cfg.Keys) > 0 {
+		fmt.Fprintln(stdout, "gateway: iam.mode is \"kv\" but config also lists static keys: — remove the keys: list (kv mode never uses it) or switch iam.mode to \"static\"")
+		return 1
+	}
+	if cfg.IAM.Mode != "kv" && cfg.IAM.Mode != "static" {
+		fmt.Fprintf(stdout, "gateway: unknown iam.mode %q\n", cfg.IAM.Mode)
+		return 1
+	}
 	nc, js, err := connect("", "gateway")
 	if err != nil {
 		fmt.Fprintln(stdout, "gateway: nats:", err)
@@ -96,7 +115,24 @@ func runGateway(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, "gateway: streams:", err)
 		return 1
 	}
-	g := gateway.New(nc, js, cfg)
+	var g *gateway.Gateway
+	switch cfg.IAM.Mode {
+	case "kv":
+		// NewKVIAM starts its watch loops in the background and returns
+		// immediately (review ruling I6) — it does not wait for the
+		// control plane's ALIASES/KEYS buckets to exist. The HTTP server
+		// below starts right away too; GET /readyz (and a 503 from
+		// /v1/models, /v1/chat/completions) reports "not ready yet" until
+		// KVIAM's first scan of both buckets completes.
+		kv, err := gateway.NewKVIAM(ctx, js)
+		if err != nil {
+			fmt.Fprintln(stdout, "gateway: kv iam:", err)
+			return 1
+		}
+		g = gateway.NewWithIAM(nc, js, cfg, kv)
+	default: // "static" — LoadConfig already defaults empty Mode to this.
+		g = gateway.New(nc, js, cfg)
+	}
 	srv := &http.Server{Addr: cfg.Addr, Handler: g.Routes()}
 	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
 	fmt.Fprintf(stdout, "gateway listening on %s\n", cfg.Addr)
@@ -156,6 +192,51 @@ func runWorker(args []string, stdout io.Writer) int {
 	defer stop()
 	if err := worker.New(nc, js, engines, cfg).Run(ctx); err != nil && err != context.Canceled {
 		fmt.Fprintln(stdout, "worker:", err)
+		return 1
+	}
+	return 0
+}
+
+func runControlplane(args []string, stdout io.Writer) int {
+	fs := flag.NewFlagSet("controlplane", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	cfgPath := fs.String("config", "", "path to controlplane YAML config (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *cfgPath == "" {
+		fmt.Fprintln(stdout, "controlplane: -config is required")
+		return 2
+	}
+	cfg, err := controlplane.LoadConfig(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(stdout, "controlplane:", err)
+		return 1
+	}
+	ctx, stop := signalContext()
+	defer stop()
+	pgStore, err := postgres.Open(ctx, cfg.PostgresDSN)
+	if err != nil {
+		fmt.Fprintln(stdout, "controlplane: postgres:", err)
+		return 1
+	}
+	// M7: close the pool on every exit path, not just the happy one.
+	defer pgStore.Close()
+	store := pgStore.Workspace("controlplane")
+	nc, js, err := connect(cfg.NATSURL, "controlplane")
+	if err != nil {
+		fmt.Fprintln(stdout, "controlplane: nats:", err)
+		return 1
+	}
+	defer nc.Close()
+	// I4 fix: the relay needs the RAW pgStore (implements delivery.Drainer
+	// directly), not the workspace-scoped store used for aggregates and
+	// projectors — see controlplane.RunRelay's doc comment for why the
+	// latter can never drive the relay against real Postgres.
+	runner := controlplane.NewRunner(cfg, nc, js, store, pgStore)
+	fmt.Fprintf(stdout, "controlplane listening on %s\n", cfg.Addr)
+	if err := runner.Run(ctx); err != nil && err != context.Canceled {
+		fmt.Fprintln(stdout, "controlplane:", err)
 		return 1
 	}
 	return 0

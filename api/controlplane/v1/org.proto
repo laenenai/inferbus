@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package controlplane.v1;
+
+option go_package = "github.com/laenenai/inferbus/api/controlplane/v1;controlplanev1";
+
+// Project is a named, archivable unit within an Org.
+message Project {
+  string id = 1;
+  string name = 2;
+  bool archived = 3;
+}
+
+// Org is the aggregate state for one organization: its members (sub ->
+// owner|admin|viewer) and its projects.
+message Org {
+  string id = 1;
+  string name = 2;
+  // sub -> owner|admin|viewer
+  map<string, string> members = 3;
+  map<string, Project> projects = 4;
+}
+
+message CreateOrg {
+  string id = 1;
+  string name = 2;
+  string owner_sub = 3;
+}
+
+message RenameOrg {
+  string name = 1;
+}
+
+message UpsertMember {
+  string sub = 1;
+  string role = 2;
+}
+
+message RemoveMember {
+  string sub = 1;
+}
+
+message CreateProject {
+  string id = 1;
+  string name = 2;
+}
+
+message ArchiveProject {
+  string id = 1;
+}
+
+message OrgCommand {
+  oneof kind {
+    CreateOrg create = 1;
+    RenameOrg rename = 2;
+    UpsertMember upsert_member = 3;
+    RemoveMember remove_member = 4;
+    CreateProject create_project = 5;
+    ArchiveProject archive_project = 6;
+  }
+}
+
+message OrgCreated {
+  string id = 1;
+  string name = 2;
+  string owner_sub = 3;
+}
+
+message OrgRenamed {
+  string name = 1;
+}
+
+message MemberUpserted {
+  string sub = 1;
+  string role = 2;
+}
+
+message MemberRemoved {
+  string sub = 1;
+}
+
+message ProjectCreated {
+  string id = 1;
+  string name = 2;
+}
+
+message ProjectArchived {
+  string id = 1;
+}
+
+message OrgEvent {
+  oneof kind {
+    OrgCreated created = 1;
+    OrgRenamed renamed = 2;
+    MemberUpserted member_upserted = 3;
+    MemberRemoved member_removed = 4;
+    ProjectCreated project_created = 5;
+    ProjectArchived project_archived = 6;
+  }
+}

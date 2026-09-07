@@ -1,0 +1,8 @@
+addr: :8081
+postgres_dsn: postgres://inferbus:inferbus@postgres:5432/inferbus
+nats_url: nats://localhost:4222
+# oidc:
+#   issuer: "[YOUR-ISSUER]"      # e.g. https://your-idp.example.com
+#   audience: "[YOUR-AUDIENCE]"
+platform_admins: []
+bootstrap_token: dev_admin_change_me
