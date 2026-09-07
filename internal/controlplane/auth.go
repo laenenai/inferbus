@@ -84,6 +84,11 @@ func (a *Auth) Authenticate(r *http.Request) (Identity, error) {
 	if a.cfg.BootstrapToken != "" {
 		presented := []byte(rawToken)
 		configured := []byte(a.cfg.BootstrapToken)
+		// ConstantTimeCompare short-circuits (returns 0 immediately, no
+		// byte-by-byte comparison) when the two lengths differ, so it does
+		// leak the configured token's length via timing. Accepted: the
+		// bootstrap token is a high-entropy secret, and length alone is not
+		// exploitable.
 		if subtle.ConstantTimeCompare(presented, configured) == 1 {
 			return Identity{Sub: "bootstrap", PlatformAdmin: true}, nil
 		}

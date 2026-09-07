@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"testing"
@@ -70,17 +71,33 @@ func TestAuthenticate_BootstrapDisabledWhenConfigEmpty(t *testing.T) {
 	cfg := Config{BootstrapToken: ""}
 	auth := NewAuthenticator(cfg, &fakeVerifier{})
 
-	// Even presenting an empty-string token must not authenticate when the
-	// bootstrap token is disabled: an empty presented token compared against
-	// an empty configured token must never succeed.
+	// newReq(t, "") skips setting the Authorization header entirely (see
+	// newReq: `if bearer != ""`), so this exercises the missing-header path,
+	// not an empty presented token. It still must fail — just not for the
+	// reason the bootstrap-disabled comment below is about.
 	_, err := auth.Authenticate(newReq(t, ""))
 	if err == nil {
-		t.Fatal("Authenticate: expected error when bootstrap token is disabled (empty config)")
+		t.Fatal("Authenticate: expected error for missing Authorization header")
 	}
 
 	_, err = auth.Authenticate(newReq(t, "anything"))
 	if err == nil {
 		t.Fatal("Authenticate: expected error when bootstrap token is disabled (empty config), got success for arbitrary token")
+	}
+
+	// This is the actual empty-presented-token case: an Authorization
+	// header IS present, with a Bearer scheme and zero-length token
+	// ("Bearer " with a trailing space, nothing after it). bearerToken's
+	// `len(auth) <= len(prefix)` guard rejects this before any bootstrap
+	// comparison happens, so it never reaches — and can never accidentally
+	// satisfy — a comparison against an empty configured token.
+	r, err := http.NewRequest(http.MethodGet, "/", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	r.Header.Set("Authorization", "Bearer ")
+	if _, err := auth.Authenticate(r); err == nil {
+		t.Fatal("Authenticate: expected error for empty-token Bearer header when bootstrap token is disabled")
 	}
 }
 
@@ -158,6 +175,58 @@ func TestAuthenticate_BootstrapTakesPriorityOverVerifier(t *testing.T) {
 	}
 	if id.Sub != "bootstrap" || !id.PlatformAdmin {
 		t.Errorf("Identity = %+v, want bootstrap platform-admin identity", id)
+	}
+}
+
+func TestAuthenticate_NonBearerSchemesRejected(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret"}
+	auth := NewAuthenticator(cfg, &fakeVerifier{})
+
+	t.Run("Basic scheme", func(t *testing.T) {
+		r, err := http.NewRequest(http.MethodGet, "/", nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		r.Header.Set("Authorization", "Basic xyz")
+		_, err = auth.Authenticate(r)
+		if !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("Authenticate: err = %v, want ErrUnauthenticated", err)
+		}
+	})
+
+	t.Run("bare token, no scheme", func(t *testing.T) {
+		r, err := http.NewRequest(http.MethodGet, "/", nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		r.Header.Set("Authorization", "s3cret")
+		_, err = auth.Authenticate(r)
+		if !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("Authenticate: err = %v, want ErrUnauthenticated", err)
+		}
+	})
+}
+
+func TestAuthenticate_FallsThroughToOIDCWhenNotBootstrapToken(t *testing.T) {
+	// Both a bootstrap token and a verifier are configured. The presented
+	// token does NOT equal the bootstrap token, so Authenticate must fall
+	// through and consult the verifier — this is the missing direction from
+	// TestAuthenticate_BootstrapTakesPriorityOverVerifier, which only
+	// exercised the bootstrap-match path.
+	cfg := Config{BootstrapToken: "s3cret", PlatformAdmins: []string{"admin-sub"}}
+	auth := NewAuthenticator(cfg, &fakeVerifier{subs: map[string]string{
+		"jwt-for-alice": "alice",
+	}})
+
+	id, err := auth.Authenticate(newReq(t, "jwt-for-alice"))
+	if err != nil {
+		t.Fatalf("Authenticate: unexpected error: %v", err)
+	}
+	if id.Sub != "alice" {
+		t.Errorf("Sub = %q, want %q (verifier identity, not bootstrap)", id.Sub, "alice")
+	}
+	if id.PlatformAdmin {
+		t.Errorf("PlatformAdmin = true, want false: alice is not in PlatformAdmins")
 	}
 }
 
