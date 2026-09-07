@@ -40,9 +40,9 @@ func connect(url string) (*nats.Conn, jetstream.JetStream, error) {
 	return nc, js, nil
 }
 
-func signalContext() context.Context {
-	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	return ctx
+func signalContext() (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	return ctx, stop
 }
 
 func runGateway(args []string, stdout io.Writer) int {
@@ -67,7 +67,8 @@ func runGateway(args []string, stdout io.Writer) int {
 		return 1
 	}
 	defer nc.Close()
-	ctx := signalContext()
+	ctx, stop := signalContext()
+	defer stop()
 	if err := wire.EnsureStreams(ctx, js); err != nil {
 		fmt.Fprintln(stdout, "gateway: streams:", err)
 		return 1
@@ -128,7 +129,9 @@ func runWorker(args []string, stdout io.Writer) int {
 		}
 	}
 	fmt.Fprintf(stdout, "worker %s serving %d model(s)\n", cfg.WorkerID, len(cfg.Models))
-	if err := worker.New(nc, js, engines, cfg).Run(signalContext()); err != nil && err != context.Canceled {
+	ctx, stop := signalContext()
+	defer stop()
+	if err := worker.New(nc, js, engines, cfg).Run(ctx); err != nil && err != context.Canceled {
 		fmt.Fprintln(stdout, "worker:", err)
 		return 1
 	}

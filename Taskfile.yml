@@ -6,3 +6,8 @@ tasks:
     cmds: [go build -o infbus ./cmd/infbus]
   tidy:
     cmds: [go mod tidy]
+  check:
+    cmds:
+      - go vet ./...
+      - go test ./... -race
+      - "! grep -riIE 'laenen|butler|\\bporter\\b' --exclude-dir=.git --exclude=design.md --exclude=Taskfile.yml . || (echo 'branding leak' && exit 1)"
