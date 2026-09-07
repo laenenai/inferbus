@@ -47,6 +47,40 @@ func TestPublishSetsHeadersAndReturnsSeq(t *testing.T) {
 	_ = nc
 }
 
+func TestPublishDeadlinePrecision(t *testing.T) {
+	_, js := testutil.RunNATS(t)
+	ctx := context.Background()
+	if err := wire.EnsureStreams(ctx, js); err != nil {
+		t.Fatal(err)
+	}
+	// Truncate(0) strips the monotonic reading so the wall-clock value we
+	// compare against below matches exactly what got formatted.
+	want := time.Now().Add(1500 * time.Millisecond).Truncate(0)
+	seq, err := relay.Publish(ctx, js, relay.Request{
+		Model: "m1", Org: "acme", Project: "prod", KeyID: "k1", Alias: "fast",
+		ReqID: "r-precision", Kind: "chat", Deadline: want,
+		Body: []byte(`{"model":"fast"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := js.Stream(ctx, wire.StreamInference)
+	raw, err := s.GetMsg(ctx, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr := raw.Header.Get(wire.HdrDeadline)
+	// Parse with the worker's exact call (internal/worker/worker.go metaOf)
+	// to verify it accepts the fractional-second value RFC3339Nano produces.
+	got, err := time.Parse(time.RFC3339, hdr)
+	if err != nil {
+		t.Fatalf("worker-style time.Parse(time.RFC3339, %q) failed: %v", hdr, err)
+	}
+	if diff := got.Sub(want.UTC()); diff < -time.Millisecond || diff > time.Millisecond {
+		t.Fatalf("deadline header = %q, parsed = %v, want within 1ms of %v (diff %v) — sub-second precision lost", hdr, got, want.UTC(), diff)
+	}
+}
+
 func TestListenerOrdersAndTerminates(t *testing.T) {
 	nc, _ := testutil.RunNATS(t)
 	l, err := relay.Listen(nc, "r2")

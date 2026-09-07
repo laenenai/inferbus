@@ -180,19 +180,18 @@ func TestExpiredDeadlineDiscardedOnPickup(t *testing.T) {
 }
 
 func TestMidStreamDeadlineMetersCanceled(t *testing.T) {
-	// wire.HdrDeadline is round-tripped through relay.Publish/metaOf as
-	// RFC3339 text, which only has second precision: any sub-second offset
-	// gets floor-truncated and can land in the past by the time the worker
-	// picks the message up, tripping the phase-1 "expired on pickup" path
-	// instead of the phase-2 mid-stream path this test targets. Use a
-	// delay/deadline combination with enough margin (>1s of slack on both
-	// sides) to be immune to that truncation: deadline 3.5s out, chunks
-	// spaced 2s apart, so the effective (truncated) deadline of 2.5s-3.5s
-	// always lands strictly between chunk1 (t=2s) and chunk2 (t=4s).
+	// wire.HdrDeadline now round-trips through relay.Publish/metaOf as
+	// RFC3339Nano text (sub-second precision preserved — see
+	// internal/relay/relay_test.go TestPublishDeadlinePrecision), so a
+	// small offset is safe here. Keep some margin over typical pickup
+	// latency (deadline > 0) and under the stream's total duration
+	// (5 chunks * 150ms delay = 600ms) so the deadline reliably fires
+	// mid-stream rather than either immediately (phase-1 backstop) or
+	// after the stream has already finished naturally.
 	eng := &testutil.FakeEngine{
 		Chunks:     []string{`{"c":0}`, `{"c":1}`, `{"c":2}`, `{"c":3}`, `{"c":4}`},
 		FinalUsage: wire.Usage{PromptTokens: 5, CompletionTokens: 5},
-		Delay:      2 * time.Second,
+		Delay:      150 * time.Millisecond,
 	}
 	nc, js := startWorker(t, eng)
 
@@ -202,7 +201,7 @@ func TestMidStreamDeadlineMetersCanceled(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	_ = publishAndListen(t, nc, js, "req-deadline", time.Now().Add(3500*time.Millisecond))
+	_ = publishAndListen(t, nc, js, "req-deadline", time.Now().Add(300*time.Millisecond))
 
 	raw, err := sub.NextMsg(10 * time.Second)
 	if err != nil {

@@ -38,7 +38,14 @@ func Publish(ctx context.Context, js jetstream.JetStream, r Request) (uint64, er
 	h.Set(wire.HdrReqID, r.ReqID)
 	h.Set(wire.HdrKind, r.Kind)
 	h.Set(wire.HdrReply, wire.RespSubject(r.ReqID))
-	h.Set(wire.HdrDeadline, r.Deadline.UTC().Format(time.RFC3339))
+	// RFC3339Nano preserves sub-second precision; time.RFC3339 alone would
+	// floor-truncate to the second, which can put an already-arrived
+	// deadline (e.g. "+200ms") in the past by the time a worker picks the
+	// message up. The worker's time.Parse(time.RFC3339, ...) in metaOf
+	// still parses these values correctly: Go's time.Parse accepts an
+	// optional fractional-second field after the seconds field even when
+	// the layout doesn't declare one (see TestPublishDeadlinePrecision).
+	h.Set(wire.HdrDeadline, r.Deadline.UTC().Format(time.RFC3339Nano))
 	ack, err := js.PublishMsg(ctx, msg)
 	if err != nil {
 		return 0, err
