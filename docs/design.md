@@ -77,6 +77,8 @@ The original private scaffold served as the porting source, not the destination;
 
 ### 6.1 `inferbus gateway`
 
+> This section is superseded by [docs/design-controlplane.md](docs/design-controlplane.md) for the control-plane implementation details.
+
 - **Data-plane HTTP:** `POST /v1/chat/completions`, `POST /v1/embeddings`, `GET /v1/models`, `GET /healthz`, `GET /readyz`. OpenAI-compatible request/response bodies; streaming via SSE (`data: <chunk>` … `data: [DONE]`).
 - **Admin HTTP:** `/admin/v1/{orgs,projects,keys,aliases,usage}` — CRUD plus usage summaries proxied from ClickHouse. Auth: OIDC bearer tokens (any standard issuer; issuer/audience configured). Role model in §9.
 - **Request lifecycle:**
@@ -135,6 +137,8 @@ JetStream makes requests durable, which decouples them from the requester's live
 ## 9. IAM
 
 ### 9.1 Data plane — API keys
+
+> This section is superseded by [docs/design-controlplane.md](docs/design-controlplane.md) for the control-plane implementation details.
 
 Postgres schema (control plane):
 

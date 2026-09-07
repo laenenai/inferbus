@@ -99,7 +99,7 @@ Postgres — they need only a NATS URL and their engine endpoints.
 | Cancel / deadline semantics (queued-delete, mid-stream cancel, deadline backstop) | done |
 | Bifrost engine (multi-provider: OpenAI, Anthropic, Ollama, ...) | done |
 | Static YAML keys/aliases | done |
-| Postgres control plane + KV alias projection | planned (M3) |
+| Postgres control plane + KV alias projection | done — [see design-controlplane.md](docs/design-controlplane.md) |
 | Harvester + ClickHouse usage pipeline | planned (M4) |
 | Admission control / priority tiers | planned (M5 / v1.5) |
 | OIDC admin API + console | planned (v2) |
@@ -127,8 +127,56 @@ concrete model `llama3.2`.
 machine** — `ib_dev_change_me` is a public, checked-in credential.
 
 Postgres and ClickHouse containers are also defined in the compose file for
-forward compatibility with the control plane and usage pipeline; nothing in
-the code currently talks to them.
+forward compatibility with the control plane and usage pipeline.
+
+## Control plane (optional)
+
+The quickstart above uses static YAML keys and aliases. To enable the
+Postgres-backed control plane instead:
+
+1. Start the full stack (control plane service starts automatically):
+```sh
+docker compose -f deploy/docker-compose.yaml up -d --build
+```
+
+2. Create an org:
+```sh
+curl -X POST http://localhost:8081/admin/v1/orgs \
+  -H "Authorization: Bearer dev_admin_change_me" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"acme","name":"Acme","owner_sub":"dev"}'
+```
+
+3. Set an alias:
+```sh
+curl -X PUT http://localhost:8081/admin/v1/aliases/acme/fast \
+  -H "Authorization: Bearer dev_admin_change_me" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"llama3.2"}'
+```
+
+4. Create an API key:
+```sh
+curl -X POST http://localhost:8081/admin/v1/keys \
+  -H "Authorization: Bearer dev_admin_change_me" \
+  -H "Content-Type: application/json" \
+  -d '{"org":"acme","project":"default","name":"dev","allow":["fast"]}'
+```
+The response includes the plaintext key (shown once); use it in the data-plane
+chat curl instead of `ib_dev_change_me`.
+
+5. Switch the gateway to KV mode by editing `deploy/gateway.example.yaml`:
+Replace the entire `keys:` and `aliases:` blocks with:
+```yaml
+iam:
+  mode: kv
+```
+
+Then restart the gateway and try the same chat curl with your created key.
+
+**Note:** KV mode forbids a static `keys:` list in the config and will error
+on startup if found. The gateway `/readyz` endpoint gates on IAM sync. To
+re-enable static mode, revert the gateway config and restart.
 
 ## Configuration
 
@@ -232,7 +280,7 @@ on every push and pull request.
 
 | Milestone | Scope |
 |---|---|
-| **M3** | Control plane: event-sourced on [es-lite](https://github.com/laenenai/es-lite) with orgs/projects/keys/aliases, admin API, NATS KV projections watched live by gateways, OIDC — see [docs/design-controlplane.md](docs/design-controlplane.md) |
+| **M3** | ✅ shipped — Control plane: event-sourced on [es-lite](https://github.com/laenenai/es-lite) with orgs/projects/keys/aliases, admin API, NATS KV projections watched live by gateways, OIDC — see [docs/design-controlplane.md](docs/design-controlplane.md) |
 | **M4** | Usage pipeline: `harvester` consuming `METERING` into ClickHouse; budget enforcement reads |
 | **M5** | Hardening: admission control from queue depth, request logging/metrics, docs |
 | **v1.5** | Priority tiers, claim-check for large payloads |
