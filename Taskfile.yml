@@ -1,0 +1,8 @@
+version: "3"
+tasks:
+  test:
+    cmds: [go test ./...]
+  build:
+    cmds: [go build -o infbus ./cmd/infbus]
+  tidy:
+    cmds: [go mod tidy]
