@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -184,6 +186,39 @@ func bucketKeys(t *testing.T, kv jetstream.KeyValue) []string {
 	return keys
 }
 
+// Mirrors of controlplane's unexported bucketMarkers/durableProj* names.
+// They are a stable, documented contract (task brief, I4 ruling) even
+// though they are not exported Go identifiers, so hardcoding them here
+// (an external test package) to inspect CP_MARKERS directly is safe.
+const (
+	testBucketMarkers      = "CP_MARKERS"
+	testDurableProjAliases = "proj-kv-aliases"
+	testDurableProjKeys    = "proj-kv-keys"
+)
+
+// getMarkerPos reads a projection's persisted position straight out of the
+// CP_MARKERS bucket, so tests can assert it actually advances (or, for the
+// fail-stop test, does not).
+func getMarkerPos(t *testing.T, js jetstream.JetStream, name string) (uint64, bool) {
+	t.Helper()
+	kv, err := js.KeyValue(context.Background(), testBucketMarkers)
+	if err != nil {
+		t.Fatalf("bind CP_MARKERS: %v", err)
+	}
+	entry, err := kv.Get(context.Background(), name)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return 0, false
+		}
+		t.Fatalf("get marker %q: %v", name, err)
+	}
+	pos, err := strconv.ParseUint(string(entry.Value()), 10, 64)
+	if err != nil {
+		t.Fatalf("parse marker %q: %v", name, err)
+	}
+	return pos, true
+}
+
 // --- alias lifecycle ------------------------------------------------------
 
 func TestKVProjectors_AliasLifecycle(t *testing.T) {
@@ -349,6 +384,28 @@ func TestKVProjectors_KeyLifecycle(t *testing.T) {
 		t.Fatal("hash1 entry still present after rotate, want deleted")
 	}
 
+	// allowlist change after rotation must land on the post-rotation hash
+	// (hash2), not the retired hash1 — exercises hashByID having been
+	// updated to the new hash by the Rotated arm (I6 ruling (b)).
+	if _, err := rt.Handle(context.Background(), stream, &controlplanev1.ApiKeyCommand{
+		Kind: &controlplanev1.ApiKeyCommand_SetAllowlist{SetAllowlist: &controlplanev1.SetAllowlist{
+			Allow: []string{"gpt-4"},
+		}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("set allowlist after rotate: %v", err)
+	}
+	waitForKV(t, func() (bool, error) {
+		e, ok := getKeyEntry(t, keysKV, hash2)
+		return ok && len(e.Allow) == 1, nil
+	})
+	entry2, _ = getKeyEntry(t, keysKV, hash2)
+	if len(entry2.Allow) != 1 || entry2.Allow[0] != "gpt-4" {
+		t.Fatalf("hash2 entry after post-rotation allowlist change = %+v, want Allow=[gpt-4]", entry2)
+	}
+	if _, ok := getKeyEntry(t, keysKV, hash1); ok {
+		t.Fatal("hash1 entry present after post-rotation allowlist change, want it to stay deleted")
+	}
+
 	// disable
 	if _, err := rt.Handle(context.Background(), stream, &controlplanev1.ApiKeyCommand{
 		Kind: &controlplanev1.ApiKeyCommand_Disable{Disable: &controlplanev1.DisableKey{}},
@@ -400,6 +457,11 @@ func TestKVProjectors_RestartReplay(t *testing.T) {
 		t.Fatal("first RunKVProjectors did not stop")
 	}
 
+	markerAfterFirstRun, ok := getMarkerPos(t, env.js, testDurableProjAliases)
+	if !ok || markerAfterFirstRun == 0 {
+		t.Fatalf("proj-kv-aliases marker after first run = (%d, ok=%v), want a saved position > 0", markerAfterFirstRun, ok)
+	}
+
 	// While projectors are stopped, append one more alias event.
 	acmeSmart, err := es.NewStreamID(alias.StreamType, "o_acme_smart")
 	if err != nil {
@@ -437,6 +499,14 @@ func TestKVProjectors_RestartReplay(t *testing.T) {
 	if len(keys) != 2 || keys[0] != "_global/fast" || keys[1] != "acme/smart" {
 		t.Fatalf("ALIASES bucket keys after restart+catchup = %v, want [_global/fast acme/smart]", keys)
 	}
+
+	// The marker must have actually advanced past where the first run left
+	// it, proving the second run's replay caught up on the new event
+	// rather than treating everything as already-applied (I6 ruling (c)).
+	markerAfterSecondRun, ok := getMarkerPos(t, env.js, testDurableProjAliases)
+	if !ok || markerAfterSecondRun <= markerAfterFirstRun {
+		t.Fatalf("proj-kv-aliases marker after second run = (%d, ok=%v), want > %d (first run's marker)", markerAfterSecondRun, ok, markerAfterFirstRun)
+	}
 }
 
 // --- resync -------------------------------------------------------------
@@ -446,15 +516,37 @@ func TestResyncKV(t *testing.T) {
 	defer cancelRelay()
 	env := setupKVProjTest(t, relayCtx)
 
-	rt := aggregate.NewRuntime(env.store, alias.Decider, alias.Codec())
+	aliasRT := aggregate.NewRuntime(env.store, alias.Decider, alias.Codec())
 	globalFast, err := es.NewStreamID(alias.StreamType, "g_fast")
 	if err != nil {
 		t.Fatalf("stream id: %v", err)
 	}
-	if _, err := rt.Handle(context.Background(), globalFast, &controlplanev1.AliasCommand{
+	if _, err := aliasRT.Handle(context.Background(), globalFast, &controlplanev1.AliasCommand{
 		Kind: &controlplanev1.AliasCommand_Set{Set: &controlplanev1.SetAlias{Target: "llama"}},
 	}, es.Meta{}); err != nil {
 		t.Fatalf("set g_fast: %v", err)
+	}
+
+	// KEYS coverage (I6 ruling (d)): resync must also correctly restore
+	// the KEYS bucket, not just ALIASES.
+	const hash1 = "3333333333333333333333333333333333333333333333333333333333333333"
+	keyRT := aggregate.NewRuntime(env.store, apikey.Decider, apikey.Codec())
+	keyStream, err := es.NewStreamID(apikey.StreamType, "key-resync")
+	if err != nil {
+		t.Fatalf("stream id: %v", err)
+	}
+	if _, err := keyRT.Handle(context.Background(), keyStream, &controlplanev1.ApiKeyCommand{
+		Kind: &controlplanev1.ApiKeyCommand_Create{Create: &controlplanev1.CreateKey{
+			Id:           "key-resync",
+			Org:          "acme",
+			Project:      "proj-1",
+			Name:         "prod",
+			Hash:         hash1,
+			Allow:        []string{"gpt-4"},
+			RateLimitRpm: 30,
+		}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("create key: %v", err)
 	}
 
 	projCtx, cancelProj := context.WithCancel(context.Background())
@@ -469,10 +561,19 @@ func TestResyncKV(t *testing.T) {
 		_, ok := getAliasEntry(t, kv, "_global/fast")
 		return ok, nil
 	})
+	waitForKV(t, func() (bool, error) {
+		kv, err := env.js.KeyValue(context.Background(), controlplane.BucketKeys)
+		if err != nil {
+			return false, err
+		}
+		_, ok := getKeyEntry(t, kv, hash1)
+		return ok, nil
+	})
 
 	// Stop the projectors before resyncing so ResyncKV owns the buckets
 	// exclusively (a live durable consumer racing a bucket delete+recreate
-	// is not a scenario the projector needs to tolerate).
+	// is not a scenario the projector needs to tolerate — see ResyncKV's
+	// doc comment, I4 ruling).
 	cancelProj()
 	select {
 	case <-projDone:
@@ -480,28 +581,210 @@ func TestResyncKV(t *testing.T) {
 		t.Fatal("RunKVProjectors did not stop")
 	}
 
-	kv, err := env.js.KeyValue(context.Background(), controlplane.BucketAliases)
+	aliasesKV, err := env.js.KeyValue(context.Background(), controlplane.BucketAliases)
 	if err != nil {
 		t.Fatalf("bind ALIASES: %v", err)
 	}
-	if _, err := kv.PutString(context.Background(), "bogus/entry", "{}"); err != nil {
-		t.Fatalf("put bogus entry: %v", err)
+	if _, err := aliasesKV.PutString(context.Background(), "bogus/entry", "{}"); err != nil {
+		t.Fatalf("put bogus alias entry: %v", err)
+	}
+	keysKV, err := env.js.KeyValue(context.Background(), controlplane.BucketKeys)
+	if err != nil {
+		t.Fatalf("bind KEYS: %v", err)
+	}
+	const bogusHash = "4444444444444444444444444444444444444444444444444444444444444444"
+	if _, err := keysKV.PutString(context.Background(), bogusHash, `{"org":"not-real"}`); err != nil {
+		t.Fatalf("put bogus key entry: %v", err)
 	}
 
 	if err := controlplane.ResyncKV(context.Background(), env.store, env.js); err != nil {
 		t.Fatalf("ResyncKV: %v", err)
 	}
 
-	kv, err = env.js.KeyValue(context.Background(), controlplane.BucketAliases)
+	aliasesKV, err = env.js.KeyValue(context.Background(), controlplane.BucketAliases)
 	if err != nil {
 		t.Fatalf("bind ALIASES after resync: %v", err)
 	}
-	keys := bucketKeys(t, kv)
-	if len(keys) != 1 || keys[0] != "_global/fast" {
-		t.Fatalf("ALIASES bucket keys after resync = %v, want exactly [_global/fast]", keys)
+	aliasKeys := bucketKeys(t, aliasesKV)
+	if len(aliasKeys) != 1 || aliasKeys[0] != "_global/fast" {
+		t.Fatalf("ALIASES bucket keys after resync = %v, want exactly [_global/fast]", aliasKeys)
 	}
-	entry, ok := getAliasEntry(t, kv, "_global/fast")
-	if !ok || entry.Target != "llama" {
-		t.Fatalf("_global/fast entry after resync = %+v (ok=%v), want Target=llama", entry, ok)
+	aliasEntry, ok := getAliasEntry(t, aliasesKV, "_global/fast")
+	if !ok || aliasEntry.Target != "llama" {
+		t.Fatalf("_global/fast entry after resync = %+v (ok=%v), want Target=llama", aliasEntry, ok)
+	}
+
+	keysKV, err = env.js.KeyValue(context.Background(), controlplane.BucketKeys)
+	if err != nil {
+		t.Fatalf("bind KEYS after resync: %v", err)
+	}
+	keyKeys := bucketKeys(t, keysKV)
+	if len(keyKeys) != 1 || keyKeys[0] != hash1 {
+		t.Fatalf("KEYS bucket keys after resync = %v, want exactly [%s]", keyKeys, hash1)
+	}
+	keyEntry, ok := getKeyEntry(t, keysKV, hash1)
+	if !ok || keyEntry.Org != "acme" || keyEntry.Project != "proj-1" || keyEntry.Name != "prod" || keyEntry.RateLimitRPM != 30 {
+		t.Fatalf("%s entry after resync = %+v (ok=%v), want Org=acme Project=proj-1 Name=prod RateLimitRPM=30", hash1, keyEntry, ok)
+	}
+	if _, ok := getKeyEntry(t, keysKV, bogusHash); ok {
+		t.Fatal("bogus KEYS entry still present after resync, want purged")
+	}
+}
+
+// --- keys-projector warmup across a restart -----------------------------
+
+// TestKVProjectors_KeysWarmupAcrossRestart exercises exactly the scenario
+// the keys projector's warmup replay exists for (see kvproj.go's package
+// doc comment): a key is created and the projector advances its marker
+// past that Created event, then stops. A later allowlist change — with no
+// hash of its own in the event payload — must still find the key's
+// current hash after the projector restarts, even though the Created
+// event now lies behind the marker. Without the full-history warmup
+// rebuilding hashByID on every start, this would fail with "allowlist
+// change for unknown key id" (I6 ruling (a): "this fails if warmup is
+// deleted").
+func TestKVProjectors_KeysWarmupAcrossRestart(t *testing.T) {
+	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	defer cancelRelay()
+	env := setupKVProjTest(t, relayCtx)
+
+	rt := aggregate.NewRuntime(env.store, apikey.Decider, apikey.Codec())
+	stream, err := es.NewStreamID(apikey.StreamType, "key-warmup")
+	if err != nil {
+		t.Fatalf("stream id: %v", err)
+	}
+	const hash1 = "5555555555555555555555555555555555555555555555555555555555555555"
+
+	if _, err := rt.Handle(context.Background(), stream, &controlplanev1.ApiKeyCommand{
+		Kind: &controlplanev1.ApiKeyCommand_Create{Create: &controlplanev1.CreateKey{
+			Id:           "key-warmup",
+			Org:          "acme",
+			Project:      "proj-1",
+			Name:         "prod",
+			Hash:         hash1,
+			Allow:        []string{"gpt-4"},
+			RateLimitRpm: 60,
+		}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	proj1Ctx, cancelProj1 := context.WithCancel(context.Background())
+	proj1Done := make(chan error, 1)
+	go func() { proj1Done <- controlplane.RunKVProjectors(proj1Ctx, env.store, env.js) }()
+
+	waitForKV(t, func() (bool, error) {
+		kv, err := env.js.KeyValue(context.Background(), controlplane.BucketKeys)
+		if err != nil {
+			return false, err
+		}
+		_, ok := getKeyEntry(t, kv, hash1)
+		return ok, nil
+	})
+
+	// Stop the projectors: the marker for proj-kv-keys now sits at (or
+	// past) the Created event's position, so the in-memory hashByID map
+	// built during this run is discarded along with the process.
+	cancelProj1()
+	select {
+	case <-proj1Done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first RunKVProjectors did not stop")
+	}
+	if pos, ok := getMarkerPos(t, env.js, testDurableProjKeys); !ok || pos == 0 {
+		t.Fatalf("proj-kv-keys marker after first run = (%d, ok=%v), want a saved position > 0", pos, ok)
+	}
+
+	// While projectors are stopped, change the allowlist. This event
+	// carries no hash — the projector must resolve "key-warmup" -> hash1
+	// itself.
+	if _, err := rt.Handle(context.Background(), stream, &controlplanev1.ApiKeyCommand{
+		Kind: &controlplanev1.ApiKeyCommand_SetAllowlist{SetAllowlist: &controlplanev1.SetAllowlist{
+			Allow: []string{"gpt-4", "claude-3"},
+		}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("set allowlist while stopped: %v", err)
+	}
+
+	proj2Ctx, cancelProj2 := context.WithCancel(context.Background())
+	defer cancelProj2()
+	proj2Done := make(chan error, 1)
+	go func() { proj2Done <- controlplane.RunKVProjectors(proj2Ctx, env.store, env.js) }()
+	t.Cleanup(func() {
+		cancelProj2()
+		select {
+		case <-proj2Done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("second RunKVProjectors did not stop")
+		}
+	})
+
+	keysKV, err := env.js.KeyValue(context.Background(), controlplane.BucketKeys)
+	if err != nil {
+		t.Fatalf("bind KEYS: %v", err)
+	}
+	waitForKV(t, func() (bool, error) {
+		e, ok := getKeyEntry(t, keysKV, hash1)
+		return ok && len(e.Allow) == 2, nil
+	})
+	entry, _ := getKeyEntry(t, keysKV, hash1)
+	if len(entry.Allow) != 2 || entry.Allow[0] != "gpt-4" || entry.Allow[1] != "claude-3" {
+		t.Fatalf("hash1 entry after restart+late allowlist change = %+v, want Allow=[gpt-4 claude-3]", entry)
+	}
+}
+
+// --- fail-stop ------------------------------------------------------------
+
+// TestKVProjectors_FailStop injects an unparseable alias stream id
+// ("badid" has no "g_"/"o_..._" prefix, so SplitAliasStreamID rejects it)
+// and asserts RunKVProjectors fails the whole run rather than silently
+// skipping the bad event and letting the marker advance past it (C1
+// ruling). The bad event is the only event in the store, so the failure
+// surfaces during RunKVProjectors's initial replay, before live
+// consumption ever starts.
+func TestKVProjectors_FailStop(t *testing.T) {
+	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	defer cancelRelay()
+	env := setupKVProjTest(t, relayCtx)
+
+	rt := aggregate.NewRuntime(env.store, alias.Decider, alias.Codec())
+	bad, err := es.NewStreamID(alias.StreamType, "badid")
+	if err != nil {
+		t.Fatalf("stream id: %v", err)
+	}
+	if _, err := rt.Handle(context.Background(), bad, &controlplanev1.AliasCommand{
+		Kind: &controlplanev1.AliasCommand_Set{Set: &controlplanev1.SetAlias{Target: "llama"}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("set badid: %v", err)
+	}
+
+	runCtx, cancelRun := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelRun()
+	runErr := controlplane.RunKVProjectors(runCtx, env.store, env.js)
+
+	if runErr == nil {
+		t.Fatal("RunKVProjectors returned nil, want a fail-stop error for the unparseable stream id")
+	}
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		t.Fatalf("RunKVProjectors returned %v, want the actual SplitAliasStreamID failure (a timeout/cancellation here means fail-stop did not trigger)", runErr)
+	}
+	if !strings.Contains(runErr.Error(), "missing scope prefix separator") {
+		t.Fatalf("RunKVProjectors error = %v, want it to mention the SplitAliasStreamID failure", runErr)
+	}
+
+	// The marker must not have advanced past the failed (only) event: no
+	// proj-kv-aliases key should exist in CP_MARKERS at all.
+	if pos, ok := getMarkerPos(t, env.js, testDurableProjAliases); ok {
+		t.Fatalf("proj-kv-aliases marker = %d after a fail-stop on the very first event, want no marker saved at all", pos)
+	}
+
+	// And the ALIASES bucket must not contain any entry derived from the
+	// bad event.
+	aliasesKV, err := env.js.KeyValue(context.Background(), controlplane.BucketAliases)
+	if err != nil {
+		t.Fatalf("bind ALIASES: %v", err)
+	}
+	if keys := bucketKeys(t, aliasesKV); len(keys) != 0 {
+		t.Fatalf("ALIASES bucket keys after fail-stop = %v, want none", keys)
 	}
 }

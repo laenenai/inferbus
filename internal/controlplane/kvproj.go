@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 
 	controlplanev1 "github.com/laenenai/inferbus/api/controlplane/v1"
@@ -85,7 +86,12 @@ type KeyEntry struct {
 	Name         string   `json:"name"`
 	Allow        []string `json:"allow,omitempty"`
 	RateLimitRPM int      `json:"rate_limit_rpm,omitempty"`
-	Disabled     bool     `json:"disabled,omitempty"`
+
+	// Disabled is reserved: today KeyDisabled deletes the entry entirely
+	// (spec §4 "KeyDisabled -> Delete current_hash") rather than flagging
+	// it, so this field is always false in the current projector. It is
+	// kept in the schema for a possible future soft-disable read model.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // Marker persists a read model's highest-applied GlobalPosition. Its shape
@@ -148,7 +154,7 @@ func (m *KVMarker) Save(ctx context.Context, name string, pos uint64) error {
 // "_" themselves, so splitting on the first ("g"/"o" prefix) and, for "o",
 // second underscore is unambiguous.
 func SplitAliasStreamID(id string) (scope, name string, err error) {
-	prefix, rest, ok := cutFirst(id, '_')
+	prefix, rest, ok := strings.Cut(id, "_")
 	if !ok {
 		return "", "", fmt.Errorf("controlplane: alias stream id %q: missing scope prefix separator", id)
 	}
@@ -161,7 +167,7 @@ func SplitAliasStreamID(id string) (scope, name string, err error) {
 		return "_global", rest, nil
 
 	case "o":
-		orgID, name, ok := cutFirst(rest, '_')
+		orgID, name, ok := strings.Cut(rest, "_")
 		if !ok {
 			return "", "", fmt.Errorf("controlplane: alias stream id %q: missing org/name separator", id)
 		}
@@ -175,53 +181,70 @@ func SplitAliasStreamID(id string) (scope, name string, err error) {
 	}
 }
 
-// cutFirst splits s at the first occurrence of sep, like strings.Cut.
-func cutFirst(s string, sep byte) (before, after string, found bool) {
-	for i := 0; i < len(s); i++ {
-		if s[i] == sep {
-			return s[:i], s[i+1:], true
-		}
-	}
-	return s, "", false
-}
-
 // aliasProjector holds the ALIASES bucket's live state.
 type aliasProjector struct {
 	kv     jetstream.KeyValue
 	marker Marker
 
-	mu  sync.Mutex
-	pos uint64
+	mu     sync.Mutex
+	pos    uint64
+	failed error // sticky: once set, every future apply() call is a no-op that returns it
 }
 
 func newAliasProjector(kv jetstream.KeyValue, marker Marker) *aliasProjector {
 	return &aliasProjector{kv: kv, marker: marker}
 }
 
+// err returns the sticky fail-stop error, if any (see apply).
+func (p *aliasProjector) err() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.failed
+}
+
 // apply is a projection.Apply: it is used verbatim both for the replay
 // catch-up and (wrapped per-envelope) for the live natsjs consumer, so the
 // two paths can never drift (api-notes projection.Apply doc).
+//
+// Fail-stop (controller ruling, C1): applyOne/KV errors are not simply
+// Nak'd-and-skipped. Live delivery calls apply once per envelope, so
+// naively advancing pos/marker on the NEXT envelope's independent,
+// successful apply() call would leave the earlier failure's redelivery
+// permanently skipped by the "GlobalPosition <= pos" idempotency check —
+// a silent, unrecoverable hole. Instead the first error is latched into
+// p.failed under the same mutex that guards pos: every subsequent call
+// (whether it's the same envelope redelivered or any later one) sees
+// p.failed != nil and returns immediately, before ever touching pos or
+// the marker. This makes it impossible for any envelope after a failure
+// to advance the marker past it, regardless of delivery order or
+// concurrency. The caller (RunKVProjectors) is responsible for actually
+// halting delivery (cancelling the shared run context) once it observes
+// this error, so a failure doesn't degenerate into an unbounded NAK loop.
 func (p *aliasProjector) apply(ctx context.Context, batch []es.Envelope) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	advanced := false
+	if p.failed != nil {
+		return p.failed
+	}
+
 	for _, e := range batch {
 		if e.GlobalPosition <= p.pos {
 			continue // idempotent skip: already applied
 		}
 		if e.StreamID.Type == alias.StreamType {
 			if err := p.applyOne(ctx, e); err != nil {
+				p.failed = err
 				return err
 			}
 		}
 		p.pos = e.GlobalPosition
-		advanced = true
+		if err := p.marker.Save(ctx, durableProjAliases, p.pos); err != nil {
+			p.failed = err
+			return err
+		}
 	}
-	if !advanced {
-		return nil
-	}
-	return p.marker.Save(ctx, durableProjAliases, p.pos)
+	return nil
 }
 
 func (p *aliasProjector) applyOne(ctx context.Context, e es.Envelope) error {
@@ -270,10 +293,18 @@ type keysProjector struct {
 	mu       sync.Mutex
 	pos      uint64
 	hashByID map[string]string
+	failed   error // sticky: once set, every future apply() call is a no-op that returns it
 }
 
 func newKeysProjector(kv jetstream.KeyValue, marker Marker) *keysProjector {
 	return &keysProjector{kv: kv, marker: marker, hashByID: map[string]string{}}
+}
+
+// err returns the sticky fail-stop error, if any (see apply).
+func (p *keysProjector) err() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.failed
 }
 
 // warmup rebuilds hashByID from the full apikey event history without
@@ -312,27 +343,35 @@ func (p *keysProjector) warmup(ctx context.Context, store es.Store) error {
 
 // apply is a projection.Apply, reused verbatim for replay and (wrapped
 // per-envelope) live consumption, exactly like aliasProjector.apply.
+// Fail-stop semantics are identical to aliasProjector.apply (see its doc
+// comment for the full rationale, C1): a sticky p.failed latch, checked
+// and set under the same mutex that guards pos/hashByID, guarantees no
+// envelope after a failure can advance the marker past it.
 func (p *keysProjector) apply(ctx context.Context, batch []es.Envelope) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	advanced := false
+	if p.failed != nil {
+		return p.failed
+	}
+
 	for _, e := range batch {
 		if e.GlobalPosition <= p.pos {
 			continue // idempotent skip: already applied
 		}
 		if e.StreamID.Type == apikey.StreamType {
 			if err := p.applyOne(ctx, e); err != nil {
+				p.failed = err
 				return err
 			}
 		}
 		p.pos = e.GlobalPosition
-		advanced = true
+		if err := p.marker.Save(ctx, durableProjKeys, p.pos); err != nil {
+			p.failed = err
+			return err
+		}
 	}
-	if !advanced {
-		return nil
-	}
-	return p.marker.Save(ctx, durableProjKeys, p.pos)
+	return nil
 }
 
 func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
@@ -350,18 +389,27 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 	switch k := evt.GetKind().(type) {
 	case *controlplanev1.ApiKeyEvent_Created:
 		c := k.Created
-		p.hashByID[id] = c.GetHash()
-		return p.put(ctx, c.GetHash(), KeyEntry{
+		// hashByID is only mutated AFTER the KV write succeeds (C2
+		// ruling): if put fails, apply() latches p.failed and no later
+		// event will ever consult this id's map entry, so there is no
+		// benefit to setting it early and every reason not to — an
+		// early set would let a subsequent (never-reached, but
+		// hypothetically re-run) allowlist change believe a hash exists
+		// in KEYS that was never actually written.
+		if err := p.put(ctx, c.GetHash(), KeyEntry{
 			Org:          c.GetOrg(),
 			Project:      c.GetProject(),
 			Name:         c.GetName(),
 			Allow:        c.GetAllow(),
 			RateLimitRPM: int(c.GetRateLimitRpm()),
-		})
+		}); err != nil {
+			return err
+		}
+		p.hashByID[id] = c.GetHash()
+		return nil
 
 	case *controlplanev1.ApiKeyEvent_Rotated:
 		r := k.Rotated
-		p.hashByID[id] = r.GetNewHash()
 		entry, ok, err := p.get(ctx, r.GetPreviousHash())
 		if err != nil {
 			return err
@@ -376,7 +424,13 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 		if err := p.put(ctx, r.GetNewHash(), entry); err != nil {
 			return err
 		}
-		return p.deleteEntry(ctx, r.GetPreviousHash())
+		if err := p.deleteEntry(ctx, r.GetPreviousHash()); err != nil {
+			return err
+		}
+		// See the Created arm above: only mutate hashByID once every KV
+		// write for this event has succeeded.
+		p.hashByID[id] = r.GetNewHash()
+		return nil
 
 	case *controlplanev1.ApiKeyEvent_Disabled:
 		return p.deleteEntry(ctx, k.Disabled.GetCurrentHash())
@@ -386,21 +440,39 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 		if !ok {
 			return fmt.Errorf("controlplane: keys projector: allowlist change for unknown key id %q", id)
 		}
-		entry, _, err := p.get(ctx, hash)
+		entry, ok, err := p.get(ctx, hash)
 		if err != nil {
 			return err
+		}
+		if !ok {
+			// C2 ruling: a hash the map believes is current but that has
+			// no KEYS entry is an invariant violation (every hash in
+			// hashByID was put there by a successful Created/Rotated KV
+			// write), not a normal case to paper over. Silently
+			// synthesizing an entry here would Put a credential-shaped
+			// KeyEntry with empty Org/Project/Name — a phantom entry —
+			// under a real key's hash. Fail-stop instead.
+			return fmt.Errorf("controlplane: keys projector: allowlist change for key id %q: no KEYS entry under hash %q (invariant violation)", id, hash)
 		}
 		entry.Allow = k.AllowlistChanged.GetAllow()
 		return p.put(ctx, hash, entry)
 
 	case *controlplanev1.ApiKeyEvent_LimitsChanged:
+		// MonthlyTokenBudget is intentionally not projected into KeyEntry
+		// (brief's schema has no such field) — budget enforcement is an
+		// M4 concern with its own read model, not this one.
 		hash, ok := p.hashByID[id]
 		if !ok {
 			return fmt.Errorf("controlplane: keys projector: limits change for unknown key id %q", id)
 		}
-		entry, _, err := p.get(ctx, hash)
+		entry, ok, err := p.get(ctx, hash)
 		if err != nil {
 			return err
+		}
+		if !ok {
+			// See the AllowlistChanged arm above: fail-stop rather than
+			// Put a phantom entry.
+			return fmt.Errorf("controlplane: keys projector: limits change for key id %q: no KEYS entry under hash %q (invariant violation)", id, hash)
 		}
 		entry.RateLimitRPM = int(k.LimitsChanged.GetRateLimitRpm())
 		return p.put(ctx, hash, entry)
@@ -444,9 +516,32 @@ func (p *keysProjector) deleteEntry(ctx context.Context, hash string) error {
 	return nil
 }
 
+// kvConfig returns the KeyValueConfig for one of this file's buckets
+// (ALIASES, KEYS, CP_MARKERS), pinned explicitly rather than left at bare
+// {Bucket: name} defaults (I5 ruling):
+//
+//   - History: 1 — these are current-state projections, not audit trails;
+//     the event log is already the durable history, so keeping only the
+//     latest KV revision per key is correct and avoids unbounded growth.
+//   - Storage: jetstream.FileStorage — durable across a NATS server
+//     restart, matching natsjs.EnsureStream's own choice for
+//     CONTROL_EVENTS (api-notes: EnsureStream "always sets file storage
+//     internally").
+//
+// Replicas is deliberately left at its default (1): M3 is a single-node
+// JetStream topology. Revisit this (Replicas: 3 or similar) when the
+// control plane is clustered.
+func kvConfig(name string) jetstream.KeyValueConfig {
+	return jetstream.KeyValueConfig{
+		Bucket:  name,
+		History: 1,
+		Storage: jetstream.FileStorage,
+	}
+}
+
 // ensureKVBucket idempotently creates (or adopts an existing) KV bucket.
 func ensureKVBucket(ctx context.Context, js jetstream.JetStream, name string) (jetstream.KeyValue, error) {
-	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: name})
+	kv, err := js.CreateOrUpdateKeyValue(ctx, kvConfig(name))
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: ensure KV bucket %q: %w", name, err)
 	}
@@ -516,10 +611,28 @@ func RunKVProjectors(ctx context.Context, store es.Store, js jetstream.JetStream
 	type result struct{ err error }
 	results := make(chan result, 2)
 
-	consume := func(cfg natsjs.ConsumerConfig, handler natsjs.ProjectionHandler) {
-		err := natsjs.Consume(runCtx, js, cfg, handler)
+	// consume wraps a projector's apply as a natsjs.ProjectionHandler.
+	// natsjs.Consume itself never surfaces a handler error (it just Naks
+	// the message and keeps pulling — see api-notes natsjs.Consume:
+	// "Returning an error naks it for redelivery"), so a handler error
+	// alone would neither stop delivery nor reach RunKVProjectors's
+	// return value. Fail-stop (C1 ruling) requires both: cancelling
+	// runCtx here makes natsjs.Consume's "<-ctx.Done(); return ctx.Err()"
+	// return promptly and stop pulling (defeating the hot-NAK-loop, I2),
+	// and apply()'s sticky p.failed (checked via projErr after both
+	// goroutines finish) is what RunKVProjectors actually returns —
+	// ctx.Err() alone would only ever be context.Canceled, not the real
+	// cause.
+	consume := func(cfg natsjs.ConsumerConfig, apply func(ctx context.Context, e es.Envelope) error) {
+		err := natsjs.Consume(runCtx, js, cfg, func(ctx context.Context, e es.Envelope) error {
+			if err := apply(ctx, e); err != nil {
+				cancel()
+				return err
+			}
+			return nil
+		})
 		if err != nil && !errors.Is(err, context.Canceled) {
-			cancel() // one consumer failing stops the other too
+			cancel() // an infra-level Consume failure stops the other consumer too
 		}
 		results <- result{err: err}
 	}
@@ -546,6 +659,16 @@ func RunKVProjectors(ctx context.Context, store es.Store, js jetstream.JetStream
 			firstErr = r.err
 		}
 	}
+	// A projector's own fail-stop error (set by apply, under its mutex)
+	// takes priority: it is the actual cause, whereas firstErr here would
+	// only ever be an infra-level natsjs.Consume setup failure or that
+	// same apply error surfacing a second time through Consume's return.
+	if err := aliasP.err(); err != nil {
+		return err
+	}
+	if err := keysP.err(); err != nil {
+		return err
+	}
 	if firstErr != nil {
 		return firstErr
 	}
@@ -557,6 +680,24 @@ func RunKVProjectors(ctx context.Context, store es.Store, js jetstream.JetStream
 // projectors' markers to 0, and replays each straight from the start of
 // store's log. It does not start live consumption; call RunKVProjectors
 // afterward for that.
+//
+// Concurrency contract (I4 ruling) — this is an offline maintenance
+// operation, not something safe to run alongside a live projector:
+//
+//   - The caller MUST stop any running RunKVProjectors (cancel its ctx and
+//     wait for it to return) before calling ResyncKV. A live durable
+//     consumer racing this function's bucket delete+recreate is not a
+//     scenario the projector needs to tolerate, and the two would fight
+//     over the same marker/KV state.
+//   - While ResyncKV is running, the ALIASES/KEYS buckets do not reflect
+//     a consistent snapshot: gateway request-time auth/alias lookups
+//     against them are effectively unavailable (empty or partial) until
+//     it completes.
+//   - Bucket recreation (DeleteKeyValue + CreateKeyValue) tears down the
+//     underlying JetStream stream, which kills any KV watcher subscribed
+//     to it. Task 11's watcher-based cache is expected to notice its
+//     watch died and re-scan the bucket from scratch rather than assume
+//     watches survive a resync.
 func ResyncKV(ctx context.Context, store es.Store, js jetstream.JetStream) error {
 	aliasesKV, err := resetKVBucket(ctx, js, BucketAliases)
 	if err != nil {

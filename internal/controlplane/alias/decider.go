@@ -49,9 +49,17 @@ var ErrInvalidTarget = errors.New("alias: invalid target")
 // way — that composition is out of scope for this package (see task-12's
 // binding note: "StreamType constants unused outside their packages except
 // stream-id construction in runtimes"). The es-lite stream-id encoding
-// itself is owned by the admin API layer (Task 10), which builds it as
-// scope + "_" + name — unambiguous because valid scopes/names never
-// contain underscores (controller ruling).
+// itself is owned by the admin API layer (Task 10); the binding encoding
+// (superseding an earlier "scope + '_' + name" draft, which collided with
+// the slug regex's ^[a-z0-9] requirement for the global scope) is:
+//
+//   - global scope: "g_<name>"
+//   - org scope:    "o_<orgid>_<name>"
+//
+// unambiguous because org ids and names are always wire.Slug-safe and
+// never contain "_" (controller ruling). Task 7's
+// controlplane.SplitAliasStreamID parses this encoding back into
+// (scope, name) for the KV projector's bucket key.
 func StreamID(scope, name string) string {
 	return scope + "/" + name
 }
