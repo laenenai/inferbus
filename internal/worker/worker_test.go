@@ -252,6 +252,34 @@ func TestShutdownMetersWorkerShutdown(t *testing.T) {
 	}
 }
 
+func TestNonStreamReturnsResultFrame(t *testing.T) {
+	eng := &testutil.FakeEngine{FinalUsage: wire.Usage{PromptTokens: 2, CompletionTokens: 1}}
+	nc, js := startWorker(t, eng)
+	l, err := relay.Listen(nc, "req-sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.Close)
+	_, err = relay.Publish(context.Background(), js, relay.Request{
+		Model: "m1", Org: "acme", Project: "prod", KeyID: "k1", Alias: "fast",
+		ReqID: "req-sync", Kind: "chat", Deadline: time.Now().Add(time.Minute),
+		Body: []byte(`{"model":"fast","messages":[]}`), // no "stream"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := drain(t, l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Kind != wire.KindResult {
+		t.Fatalf("frames = %+v", msgs)
+	}
+	if msgs[0].Usage == nil || msgs[0].Usage.PromptTokens != 2 {
+		t.Fatalf("result usage = %+v", msgs[0].Usage)
+	}
+}
+
 func TestMissingEngineFailsFast(t *testing.T) {
 	nc, js := testutil.RunNATS(t)
 	w := worker.New(nc, js, map[string]ibengine.Engine{}, worker.Config{

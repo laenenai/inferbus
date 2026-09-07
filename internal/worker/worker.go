@@ -199,6 +199,44 @@ func (w *Worker) handle(ctx context.Context, mc ModelConfig, msg jetstream.Msg) 
 	}
 
 	eng := w.engines[mc.Name]
+
+	var probe struct {
+		Stream *bool `json:"stream"`
+	}
+	_ = json.Unmarshal(msg.Data(), &probe)
+	streaming := probe.Stream != nil && *probe.Stream
+
+	if !streaming {
+		resp, usage, err := eng.Chat(hctx, mc.Name, msg.Data())
+		dur := time.Since(start).Milliseconds()
+		switch {
+		case err == nil:
+			publish(wire.Message{Kind: wire.KindResult, Payload: resp, Usage: &usage})
+			_ = msg.Ack()
+			w.meter(m, mc, usage, "ok", "", false, 0, dur, queueMS)
+		case context.Cause(hctx) == canceled:
+			_ = msg.Ack() // canceled requests must never redeliver
+			w.meter(m, mc, usage, "canceled", "", true, 0, dur, queueMS)
+		case errors.Is(context.Cause(hctx), context.DeadlineExceeded):
+			// Deadline fired before the engine returned — same treatment as
+			// an explicit client cancel: no terminal frame, meter as
+			// canceled.
+			_ = msg.Ack()
+			w.meter(m, mc, usage, "canceled", "", true, 0, dur, queueMS)
+		case errors.Is(context.Cause(hctx), context.Canceled):
+			// Worker Run ctx was canceled (graceful shutdown), not a client
+			// cancel or a deadline — don't report this as an engine error.
+			_ = msg.Ack()
+			w.meter(m, mc, usage, "canceled", "worker_shutdown", true, 0, dur, queueMS)
+		default:
+			we := terminalError(err)
+			publish(wire.Message{Kind: wire.KindError, Error: &we})
+			_ = msg.Ack() // terminal outcome → ack (spec §7.1)
+			w.meter(m, mc, usage, "error", we.Code, true, 0, dur, queueMS)
+		}
+		return
+	}
+
 	usage, err := eng.ChatStream(hctx, mc.Name, msg.Data(), func(chunk json.RawMessage) error {
 		if firstChunk.IsZero() {
 			firstChunk = time.Now()
@@ -232,15 +270,23 @@ func (w *Worker) handle(ctx context.Context, mc ModelConfig, msg jetstream.Msg) 
 		_ = msg.Ack()
 		w.meter(m, mc, usage, "canceled", "worker_shutdown", true, ttft, dur, queueMS)
 	default:
-		we := wire.WireError{Code: "worker_error", Message: err.Error(), HTTPStatus: 502}
-		var ee *ibengine.Error
-		if errors.As(err, &ee) {
-			we = wire.WireError{Code: ee.Code, Message: ee.Message, HTTPStatus: ee.HTTPStatus}
-		}
+		we := terminalError(err)
 		publish(wire.Message{Kind: wire.KindError, Error: &we})
 		_ = msg.Ack() // terminal outcome → ack (spec §7.1)
 		w.meter(m, mc, usage, "error", we.Code, true, ttft, dur, queueMS)
 	}
+}
+
+// terminalError maps an engine error to the wire.WireError sent in the
+// terminal error frame, unwrapping *ibengine.Error for its code/status
+// when present. Shared by the streaming and non-stream terminal switches.
+func terminalError(err error) wire.WireError {
+	we := wire.WireError{Code: "worker_error", Message: err.Error(), HTTPStatus: 502}
+	var ee *ibengine.Error
+	if errors.As(err, &ee) {
+		we = wire.WireError{Code: ee.Code, Message: ee.Message, HTTPStatus: ee.HTTPStatus}
+	}
+	return we
 }
 
 func (w *Worker) meter(m reqMeta, mc ModelConfig, u wire.Usage, status, errCode string, estimated bool, ttft, dur, queueMS int64) {
