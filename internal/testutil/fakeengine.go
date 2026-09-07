@@ -24,15 +24,33 @@ func (f *FakeEngine) Chat(ctx context.Context, model string, body json.RawMessag
 }
 
 func (f *FakeEngine) ChatStream(ctx context.Context, model string, body json.RawMessage, emit func(json.RawMessage) error) (wire.Usage, error) {
+	// Issue 1: Err swallowed on empty Chunks — half of zero is immediately
+	if f.Err != nil && len(f.Chunks) == 0 {
+		return wire.Usage{}, f.Err
+	}
+
 	for i, c := range f.Chunks {
+		// Mid-loop error return for non-empty Chunks (half-way point)
 		if f.Err != nil && i == len(f.Chunks)/2 {
 			return wire.Usage{}, f.Err
 		}
+
+		// Issue 2: Delay applies BETWEEN chunks only (not before first)
+		if i > 0 && f.Delay > 0 {
+			select {
+			case <-ctx.Done():
+				return wire.Usage{}, ctx.Err()
+			case <-time.After(f.Delay):
+			}
+		}
+
+		// Issue 3: Non-blocking context check before emit for deterministic priority
 		select {
 		case <-ctx.Done():
 			return wire.Usage{}, ctx.Err()
-		case <-time.After(f.Delay):
+		default:
 		}
+
 		if err := emit(json.RawMessage(c)); err != nil {
 			return wire.Usage{}, err
 		}
