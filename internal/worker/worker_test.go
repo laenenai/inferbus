@@ -280,6 +280,169 @@ func TestNonStreamReturnsResultFrame(t *testing.T) {
 	}
 }
 
+func TestNonStreamEngineError(t *testing.T) {
+	eng := &testutil.FakeEngine{
+		Err: &ibengine.Error{Code: "upstream_error", Message: "boom", HTTPStatus: 502},
+	}
+	nc, js := startWorker(t, eng)
+
+	sub, err := nc.SubscribeSync("metering.usage.>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	l, err := relay.Listen(nc, "req-sync-err")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.Close)
+	_, err = relay.Publish(context.Background(), js, relay.Request{
+		Model: "m1", Org: "acme", Project: "prod", KeyID: "k1", Alias: "fast",
+		ReqID: "req-sync-err", Kind: "chat", Deadline: time.Now().Add(time.Minute),
+		Body: []byte(`{"model":"fast","messages":[]}`), // no "stream"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, drainErr := drain(t, l)
+	var re *relay.RemoteError
+	if !errors.As(drainErr, &re) || re.Err.HTTPStatus != 502 {
+		t.Fatalf("err = %v", drainErr)
+	}
+
+	raw, err := sub.NextMsg(10 * time.Second)
+	if err != nil {
+		t.Fatal("no usage event for non-stream engine error")
+	}
+	var ev wire.UsageEvent
+	if err := json.Unmarshal(raw.Data, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Status != "error" {
+		t.Fatalf("usage event = %+v", ev)
+	}
+}
+
+func TestNonStreamClientCancel(t *testing.T) {
+	eng := &testutil.FakeEngine{
+		FinalUsage: wire.Usage{PromptTokens: 5, CompletionTokens: 5},
+		Delay:      300 * time.Millisecond,
+	}
+	nc, js := startWorker(t, eng)
+
+	sub, err := nc.SubscribeSync("metering.usage.>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	l, err := relay.Listen(nc, "req-sync-cancel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.Close)
+	_, err = relay.Publish(context.Background(), js, relay.Request{
+		Model: "m1", Org: "acme", Project: "prod", KeyID: "k1", Alias: "fast",
+		ReqID: "req-sync-cancel", Kind: "chat", Deadline: time.Now().Add(time.Minute),
+		Body: []byte(`{"model":"fast","messages":[]}`), // no "stream"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(50 * time.Millisecond) // let the worker pick up and start eng.Chat
+	if err := relay.Cancel(nc, "req-sync-cancel"); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sub.NextMsg(10 * time.Second)
+	if err != nil {
+		t.Fatal("no usage event after non-stream client cancel")
+	}
+	var ev wire.UsageEvent
+	if err := json.Unmarshal(raw.Data, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Status != "canceled" || !ev.Estimated || ev.ErrorCode != "" {
+		t.Fatalf("usage event = %+v", ev)
+	}
+}
+
+func TestNonStreamDeadline(t *testing.T) {
+	eng := &testutil.FakeEngine{
+		FinalUsage: wire.Usage{PromptTokens: 5, CompletionTokens: 5},
+		Delay:      400 * time.Millisecond,
+	}
+	nc, js := startWorker(t, eng)
+
+	sub, err := nc.SubscribeSync("metering.usage.>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	_, err = relay.Publish(context.Background(), js, relay.Request{
+		Model: "m1", Org: "acme", Project: "prod", KeyID: "k1", Alias: "fast",
+		ReqID: "req-sync-deadline", Kind: "chat", Deadline: time.Now().Add(150 * time.Millisecond),
+		Body: []byte(`{"model":"fast","messages":[]}`), // no "stream"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sub.NextMsg(10 * time.Second)
+	if err != nil {
+		t.Fatal("no usage event after non-stream deadline expiry")
+	}
+	var ev wire.UsageEvent
+	if err := json.Unmarshal(raw.Data, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Status != "canceled" || !ev.Estimated || ev.ErrorCode != "" {
+		t.Fatalf("usage event = %+v", ev)
+	}
+}
+
+func TestNonStreamShutdown(t *testing.T) {
+	eng := &testutil.FakeEngine{
+		FinalUsage: wire.Usage{PromptTokens: 5, CompletionTokens: 5},
+		Delay:      400 * time.Millisecond,
+	}
+	nc, js, cancelWorker := startWorkerCancelable(t, eng)
+
+	sub, err := nc.SubscribeSync("metering.usage.>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+	_, err = relay.Publish(context.Background(), js, relay.Request{
+		Model: "m1", Org: "acme", Project: "prod", KeyID: "k1", Alias: "fast",
+		ReqID: "req-sync-shutdown", Kind: "chat", Deadline: time.Now().Add(time.Minute),
+		Body: []byte(`{"model":"fast","messages":[]}`), // no "stream"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(50 * time.Millisecond) // let the worker pick up and start eng.Chat
+	cancelWorker()                    // simulate graceful worker shutdown mid-request
+
+	raw, err := sub.NextMsg(10 * time.Second)
+	if err != nil {
+		t.Fatal("no usage event after non-stream worker shutdown")
+	}
+	var ev wire.UsageEvent
+	if err := json.Unmarshal(raw.Data, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Status != "canceled" || ev.ErrorCode != "worker_shutdown" {
+		t.Fatalf("usage event = %+v", ev)
+	}
+}
+
 func TestMissingEngineFailsFast(t *testing.T) {
 	nc, js := testutil.RunNATS(t)
 	w := worker.New(nc, js, map[string]ibengine.Engine{}, worker.Config{

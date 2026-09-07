@@ -20,6 +20,13 @@ func (f *FakeEngine) Chat(ctx context.Context, model string, body json.RawMessag
 	if f.Err != nil {
 		return nil, wire.Usage{}, f.Err
 	}
+	if f.Delay > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, wire.Usage{}, ctx.Err()
+		case <-time.After(f.Delay):
+		}
+	}
 	return json.RawMessage(`{"object":"chat.completion"}`), f.FinalUsage, nil
 }
 
