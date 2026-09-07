@@ -3,7 +3,16 @@ nats_url: nats://localhost:4222
 models:
   - name: llama3.2          # concrete model name = NATS subject token
     engine: openai_http     # any OpenAI-compatible server (ollama, vllm, llama.cpp)
-    url: http://localhost:11434
+    # host.docker.internal reaches a model server (e.g. Ollama) running on
+    # the Docker host from inside this container. If your engine runs
+    # in-network instead (its own compose service, or another container on
+    # this network), change this to that service's name, e.g.
+    # http://ollama:11434.
+    url: http://host.docker.internal:11434
+    # max_inflight maps to this model's JetStream consumer MaxAckPending —
+    # a FLEET-WIDE cap shared by every worker serving this model, not a
+    # per-node limit. If workers configure divergent values for the same
+    # model, the last worker to (re)create the consumer wins.
     max_inflight: 4
 #  - name: claude-sonnet
 #    engine: bifrost

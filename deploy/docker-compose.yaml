@@ -43,5 +43,6 @@ services:
     command: ["worker", "-config", "/etc/infbus/worker.yaml"]
     environment: { INFBUS_NATS_URL: nats://nats:4222 }
     volumes: ["./worker.example.yaml:/etc/infbus/worker.yaml:ro"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       nats: { condition: service_healthy }

@@ -94,10 +94,15 @@ curl http://localhost:8080/v1/chat/completions \
 
 The compose file brings up NATS (JetStream), the gateway (port 8080), and one
 worker. The worker's example config (`deploy/worker.example.yaml`) points at
-an OpenAI-compatible engine on `localhost:11434` (e.g. Ollama running
-`llama3.2`) — point it at any vLLM / llama.cpp / Ollama endpoint you have. The
-example key `ib_dev_change_me` is allowed to use the alias `fast`, which
-resolves to the concrete model `llama3.2`.
+`http://host.docker.internal:11434` so the containerized worker can reach a
+model server (e.g. Ollama running `llama3.2`) on the Docker host; if your
+engine runs in-network instead (its own compose service, or another
+container), change that URL to the service's name. The example key
+`ib_dev_change_me` is allowed to use the alias `fast`, which resolves to the
+concrete model `llama3.2`.
+
+**Change the example key before exposing the gateway to anything but your own
+machine** — `ib_dev_change_me` is a public, checked-in credential.
 
 Postgres and ClickHouse containers are also defined in the compose file for
 forward compatibility with the control plane and usage pipeline; nothing in
@@ -134,7 +139,7 @@ nats_url: nats://localhost:4222
 models:
   - name: llama3.2          # concrete model name = NATS subject token
     engine: openai_http     # any OpenAI-compatible server (ollama, vllm, llama.cpp)
-    url: http://localhost:11434
+    url: http://host.docker.internal:11434
     max_inflight: 4
 #  - name: claude-sonnet
 #    engine: bifrost
@@ -147,7 +152,19 @@ models:
 Each model maps to one engine instance: `openai_http` talks to any
 OpenAI-compatible HTTP server; `bifrost` routes through the embedded Bifrost
 library to a named provider (OpenAI, Anthropic, Ollama, vLLM, ...), with the
-provider's own API key read from the named environment variable.
+provider's own API key read from the named environment variable. `url`
+defaults to `host.docker.internal`, which reaches a model server running on
+the Docker host from inside the worker's container (requires the compose
+file's `extra_hosts: host-gateway` mapping); point it at an in-network
+service name instead if your engine runs alongside the worker.
+
+`max_inflight` is not a per-worker concurrency knob: it maps directly to that
+model's JetStream consumer `MaxAckPending`, which is a **fleet-wide** cap on
+un-acked in-flight messages shared by every worker serving that model. If
+multiple workers configure different `max_inflight` values for the same
+model, whichever worker most recently (re)created the consumer wins for the
+whole fleet — keep the value consistent across workers serving the same
+model.
 
 ## Wire contract
 
