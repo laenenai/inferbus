@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -79,6 +80,19 @@ func (noOIDCVerifier) Verify(context.Context, string) (string, error) {
 }
 
 var errNoOIDCConfigured = errors.New("controlplane: no OIDC verifier configured (set oidc.issuer or use the bootstrap token)")
+
+// warnIfBootstrapTokenEnabled logs one loud slog.Warn line naming
+// bootstrap_token as a static platform-admin credential when cfg has one
+// configured (spec §3: "logged loudly"). It never logs the token's own
+// value — only that the feature is enabled. Factored out of Run so it can
+// be tested directly against a captured slog handler, without spinning up
+// the rest of the runner.
+func warnIfBootstrapTokenEnabled(logger *slog.Logger, cfg Config) {
+	if cfg.BootstrapToken == "" {
+		return
+	}
+	logger.Warn("bootstrap_token is enabled — a static platform-admin credential; disable it outside development")
+}
 
 // health composes the relay's status with the current projector
 // generation's status into one lock-free "is everything up" signal
@@ -183,6 +197,8 @@ func runRelay(parent context.Context, store es.Store, js jetstream.JetStream) (c
 
 // Run assembles and serves the control plane until ctx is cancelled.
 func (r *Runner) Run(ctx context.Context) error {
+	warnIfBootstrapTokenEnabled(slog.Default(), r.cfg)
+
 	if err := EnsureControlStream(ctx, r.js); err != nil {
 		return fmt.Errorf("controlplane: ensure control stream: %w", err)
 	}

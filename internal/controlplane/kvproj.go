@@ -152,7 +152,7 @@ func SplitAliasStreamID(id string) (scope, name string, err error) {
 		if rest == "" {
 			return "", "", fmt.Errorf("controlplane: alias stream id %q: empty name", id)
 		}
-		return "_global", rest, nil
+		return cpkv.GlobalScope, rest, nil
 
 	case "o":
 		orgID, name, ok := strings.Cut(rest, "_")
@@ -446,9 +446,14 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 		return p.put(ctx, hash, entry)
 
 	case *controlplanev1.ApiKeyEvent_LimitsChanged:
-		// MonthlyTokenBudget is intentionally not projected into KeyEntry
-		// (brief's schema has no such field) — budget enforcement is an
-		// M4 concern with its own read model, not this one.
+		// MonthlyTokenBudget is intentionally NOT projected into KeyEntry:
+		// the KV bucket is the gateway's request-time, data-plane read
+		// model (auth/allowlist/rate-limit only), and budget enforcement
+		// is an M4 concern with its own read model, not this one. The
+		// ADMIN read model (KeyRow/cp_api_keys, readmodel.go) DOES carry
+		// MonthlyTokenBudget — GET /admin/v1/keys surfaces it (I5) — so
+		// this is a deliberate data-plane/control-plane split, not an
+		// oversight.
 		hash, ok := p.hashByID[id]
 		if !ok {
 			return fmt.Errorf("controlplane: keys projector: limits change for unknown key id %q", id)

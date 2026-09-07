@@ -264,6 +264,93 @@ func TestAdmin_CreateKey_PlaintextOnce_ListHidesHashAndPlaintext(t *testing.T) {
 	}
 }
 
+// TestAdmin_ListKeys_SurfacesMonthlyTokenBudget is finding I5: a key's
+// monthly_token_budget (set at creation, and later changed via
+// PUT .../limits) must be visible through GET /admin/v1/keys — the admin
+// read model previously dropped it entirely (KeyRow had no such field), so
+// an admin auditing a key's limits couldn't see its budget at all.
+func TestAdmin_ListKeys_SurfacesMonthlyTokenBudget(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret"}
+	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
+	mux := f.admin.Routes()
+
+	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
+		"id": "acme", "name": "Acme", "owner_sub": "dev",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create org: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doRequest(t, mux, http.MethodPost, "/admin/v1/orgs/acme/projects", "s3cret", map[string]any{
+		"id": "proj-1", "name": "Prod",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create project: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doRequest(t, mux, http.MethodPost, "/admin/v1/keys", "s3cret", map[string]any{
+		"org": "acme", "project": "proj-1", "name": "prod-key",
+		"allow": []string{"gpt-4"}, "rate_limit_rpm": 60, "monthly_token_budget": 1_000_000,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create key: %d %s", rec.Code, rec.Body.String())
+	}
+	var created keyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if created.MonthlyTokenBudget != 1_000_000 {
+		t.Fatalf("createKey response MonthlyTokenBudget = %d, want 1000000", created.MonthlyTokenBudget)
+	}
+
+	waitForSQL(t, func() (bool, error) {
+		rows, err := f.rs.ListKeys(context.Background(), "acme")
+		if err != nil {
+			return false, err
+		}
+		return len(rows) == 1, nil
+	})
+
+	rec = doRequest(t, mux, http.MethodGet, "/admin/v1/keys?org=acme", "s3cret", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list keys: %d %s", rec.Code, rec.Body.String())
+	}
+	var listed []keyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	if len(listed) != 1 || listed[0].MonthlyTokenBudget != 1_000_000 {
+		t.Fatalf("listed keys after create = %+v, want one row with MonthlyTokenBudget=1000000", listed)
+	}
+
+	// Changing the limit is reflected too.
+	rec = doRequest(t, mux, http.MethodPut, "/admin/v1/keys/"+created.ID+"/limits", "s3cret", map[string]any{
+		"rate_limit_rpm": 60, "monthly_token_budget": 2_000_000,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set limits: %d %s", rec.Code, rec.Body.String())
+	}
+
+	waitForSQL(t, func() (bool, error) {
+		rows, err := f.rs.ListKeys(context.Background(), "acme")
+		if err != nil {
+			return false, err
+		}
+		return len(rows) == 1 && rows[0].MonthlyTokenBudget == 2_000_000, nil
+	})
+
+	rec = doRequest(t, mux, http.MethodGet, "/admin/v1/keys?org=acme", "s3cret", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list keys after set limits: %d %s", rec.Code, rec.Body.String())
+	}
+	listed = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("unmarshal list after set limits: %v", err)
+	}
+	if len(listed) != 1 || listed[0].MonthlyTokenBudget != 2_000_000 {
+		t.Fatalf("listed keys after set limits = %+v, want one row with MonthlyTokenBudget=2000000", listed)
+	}
+}
+
 func TestAdmin_NonMemberForbidden_ViewerForbiddenOnManage(t *testing.T) {
 	cfg := Config{BootstrapToken: "s3cret"}
 	verifier := &fakeVerifier{subs: map[string]string{

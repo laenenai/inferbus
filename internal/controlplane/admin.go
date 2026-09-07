@@ -493,13 +493,14 @@ func keyResponseFromState(s *controlplanev1.ApiKey) keyResponse {
 
 func keyResponseFromRow(row KeyRow) keyResponse {
 	return keyResponse{
-		ID:           row.ID,
-		Org:          row.Org,
-		Project:      row.Project,
-		Name:         row.Name,
-		Allow:        nonNilStrings(row.Allow),
-		RateLimitRPM: int32(row.RateLimitRPM),
-		Disabled:     row.Disabled,
+		ID:                 row.ID,
+		Org:                row.Org,
+		Project:            row.Project,
+		Name:               row.Name,
+		Allow:              nonNilStrings(row.Allow),
+		RateLimitRPM:       int32(row.RateLimitRPM),
+		MonthlyTokenBudget: row.MonthlyTokenBudget,
+		Disabled:           row.Disabled,
 	}
 }
 

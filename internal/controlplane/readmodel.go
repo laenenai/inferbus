@@ -91,13 +91,14 @@ type ProjectRow struct {
 // requirement, Task 8), so nothing in this package's write path may ever
 // populate one.
 type KeyRow struct {
-	ID           string
-	Org          string
-	Project      string
-	Name         string
-	Allow        []string
-	RateLimitRPM int
-	Disabled     bool
+	ID                 string
+	Org                string
+	Project            string
+	Name               string
+	Allow              []string
+	RateLimitRPM       int
+	MonthlyTokenBudget int64
+	Disabled           bool
 }
 
 // AliasRow is one row of the cp_aliases admin read model.
@@ -348,13 +349,14 @@ var pgSchema = []string{
 		PRIMARY KEY (org, id)
 	)`,
 	`CREATE TABLE IF NOT EXISTS cp_api_keys (
-		id             TEXT PRIMARY KEY,
-		org            TEXT NOT NULL,
-		project        TEXT NOT NULL,
-		name           TEXT NOT NULL,
-		allow          TEXT[] NOT NULL DEFAULT '{}',
-		rate_limit_rpm INTEGER NOT NULL DEFAULT 0,
-		disabled       BOOLEAN NOT NULL DEFAULT false
+		id                   TEXT PRIMARY KEY,
+		org                  TEXT NOT NULL,
+		project              TEXT NOT NULL,
+		name                 TEXT NOT NULL,
+		allow                TEXT[] NOT NULL DEFAULT '{}',
+		rate_limit_rpm       INTEGER NOT NULL DEFAULT 0,
+		monthly_token_budget BIGINT NOT NULL DEFAULT 0,
+		disabled             BOOLEAN NOT NULL DEFAULT false
 	)`,
 	`CREATE TABLE IF NOT EXISTS cp_aliases (
 		scope  TEXT NOT NULL,
@@ -437,13 +439,14 @@ func (s *PgReadStore) UpsertKey(ctx context.Context, row KeyRow) error {
 	// so both impls apply the same nil-vs-empty rule.
 	allow := nonNilStrings(row.Allow)
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO cp_api_keys (id, org, project, name, allow, rate_limit_rpm, disabled)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO cp_api_keys (id, org, project, name, allow, rate_limit_rpm, monthly_token_budget, disabled)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (id) DO UPDATE SET
 			org = EXCLUDED.org, project = EXCLUDED.project, name = EXCLUDED.name,
 			allow = EXCLUDED.allow, rate_limit_rpm = EXCLUDED.rate_limit_rpm,
+			monthly_token_budget = EXCLUDED.monthly_token_budget,
 			disabled = EXCLUDED.disabled`,
-		row.ID, row.Org, row.Project, row.Name, allow, row.RateLimitRPM, row.Disabled)
+		row.ID, row.Org, row.Project, row.Name, allow, row.RateLimitRPM, row.MonthlyTokenBudget, row.Disabled)
 	if err != nil {
 		return fmt.Errorf("controlplane: pg read store: upsert key %q: %w", row.ID, err)
 	}
@@ -550,7 +553,7 @@ func (s *PgReadStore) GetOrg(ctx context.Context, id string) (OrgRow, []MemberRo
 
 func (s *PgReadStore) ListKeys(ctx context.Context, org string) ([]KeyRow, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, org, project, name, allow, rate_limit_rpm, disabled
+		SELECT id, org, project, name, allow, rate_limit_rpm, monthly_token_budget, disabled
 		FROM cp_api_keys WHERE org = $1 ORDER BY id`, org)
 	if err != nil {
 		return nil, fmt.Errorf("controlplane: pg read store: list keys %q: %w", org, err)
@@ -561,7 +564,7 @@ func (s *PgReadStore) ListKeys(ctx context.Context, org string) ([]KeyRow, error
 	out := []KeyRow{}
 	for rows.Next() {
 		var row KeyRow
-		if err := rows.Scan(&row.ID, &row.Org, &row.Project, &row.Name, &row.Allow, &row.RateLimitRPM, &row.Disabled); err != nil {
+		if err := rows.Scan(&row.ID, &row.Org, &row.Project, &row.Name, &row.Allow, &row.RateLimitRPM, &row.MonthlyTokenBudget, &row.Disabled); err != nil {
 			return nil, fmt.Errorf("controlplane: pg read store: list keys %q: scan: %w", org, err)
 		}
 		row.Allow = nonNilStrings(row.Allow)
@@ -780,9 +783,10 @@ func (p *sqlProjector) applyApiKeyEvent(ctx context.Context, e es.Envelope) erro
 		// that broke PgReadStore.UpsertKey's NOT NULL TEXT[] column
 		// (review round 2, Critical). Pinning it here, at the source,
 		// means every ReadStore impl receives an already-non-nil slice.
-		Allow:        nonNilStrings(append([]string(nil), state.GetAllow()...)),
-		RateLimitRPM: int(state.GetRateLimitRpm()),
-		Disabled:     state.GetDisabled(),
+		Allow:              nonNilStrings(append([]string(nil), state.GetAllow()...)),
+		RateLimitRPM:       int(state.GetRateLimitRpm()),
+		MonthlyTokenBudget: state.GetMonthlyTokenBudget(),
+		Disabled:           state.GetDisabled(),
 	})
 }
 
