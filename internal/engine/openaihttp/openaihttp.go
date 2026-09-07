@@ -51,7 +51,11 @@ func (e *Engine) post(ctx context.Context, body []byte) (*http.Response, error) 
 }
 
 func (e *Engine) Chat(ctx context.Context, model string, body json.RawMessage) (json.RawMessage, wire.Usage, error) {
-	resp, err := e.post(ctx, body)
+	rewritten, err := rewriteModel(body, model)
+	if err != nil {
+		return nil, wire.Usage{}, err
+	}
+	resp, err := e.post(ctx, rewritten)
 	if err != nil {
 		return nil, wire.Usage{}, err
 	}
@@ -64,7 +68,7 @@ func (e *Engine) Chat(ctx context.Context, model string, body json.RawMessage) (
 }
 
 func (e *Engine) ChatStream(ctx context.Context, model string, body json.RawMessage, emit func(json.RawMessage) error) (wire.Usage, error) {
-	forced, err := forceStream(body)
+	forced, err := forceStream(body, model)
 	if err != nil {
 		return wire.Usage{}, err
 	}
@@ -95,14 +99,47 @@ func (e *Engine) ChatStream(ctx context.Context, model string, body json.RawMess
 	return usage, sc.Err()
 }
 
-// forceStream sets "stream":true on the request body.
-func forceStream(body json.RawMessage) ([]byte, error) {
+// forceStream sets "stream":true and rewrites "model" to the concrete
+// upstream model name on the request body.
+func forceStream(body json.RawMessage, model string) ([]byte, error) {
+	m, err := decodeObject(body)
+	if err != nil {
+		return nil, err
+	}
+	m["stream"] = json.RawMessage("true")
+	setModel(m, model)
+	return json.Marshal(m)
+}
+
+// rewriteModel rewrites the request body's "model" field to the concrete
+// upstream model name. The gateway forwards the client body verbatim, so
+// its "model" field carries the client-facing alias (e.g. "fast") while the
+// concrete model name arrives separately as the model parameter; a real
+// upstream engine would 404 on the alias, so it must be rewritten before
+// the request is forwarded.
+func rewriteModel(body json.RawMessage, model string) ([]byte, error) {
+	m, err := decodeObject(body)
+	if err != nil {
+		return nil, err
+	}
+	setModel(m, model)
+	return json.Marshal(m)
+}
+
+func decodeObject(body json.RawMessage) (map[string]json.RawMessage, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, &ibengine.Error{Code: "bad_request", HTTPStatus: 400, Message: "request body is not a JSON object"}
 	}
-	m["stream"] = json.RawMessage("true")
-	return json.Marshal(m)
+	return m, nil
+}
+
+func setModel(m map[string]json.RawMessage, model string) {
+	b, err := json.Marshal(model)
+	if err != nil {
+		return
+	}
+	m["model"] = b
 }
 
 func usageOf(b []byte) wire.Usage {
