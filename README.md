@@ -147,7 +147,15 @@ curl -X POST http://localhost:8081/admin/v1/orgs \
   -d '{"id":"acme","name":"Acme","owner_sub":"dev"}'
 ```
 
-3. Set an alias:
+3. Create a project within the org:
+```sh
+curl -X POST http://localhost:8081/admin/v1/orgs/acme/projects \
+  -H "Authorization: Bearer dev_admin_change_me" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"default","name":"Default"}'
+```
+
+4. Set an alias:
 ```sh
 curl -X PUT http://localhost:8081/admin/v1/aliases/acme/fast \
   -H "Authorization: Bearer dev_admin_change_me" \
@@ -155,7 +163,7 @@ curl -X PUT http://localhost:8081/admin/v1/aliases/acme/fast \
   -d '{"target":"llama3.2"}'
 ```
 
-4. Create an API key:
+5. Create an API key:
 ```sh
 curl -X POST http://localhost:8081/admin/v1/keys \
   -H "Authorization: Bearer dev_admin_change_me" \
@@ -165,7 +173,7 @@ curl -X POST http://localhost:8081/admin/v1/keys \
 The response includes the plaintext key (shown once); use it in the data-plane
 chat curl instead of `ib_dev_change_me`.
 
-5. Switch the gateway to KV mode by editing `deploy/gateway.example.yaml`:
+6. Switch the gateway to KV mode by editing `deploy/gateway.example.yaml`:
 Replace the entire `keys:` and `aliases:` blocks with:
 ```yaml
 iam:
