@@ -8,10 +8,13 @@ import (
 )
 
 type ModelConfig struct {
-	Name        string `yaml:"name"`
-	Engine      string `yaml:"engine"` // "openai_http" | "bifrost"
-	URL         string `yaml:"url"`    // openai_http base URL
-	MaxInflight int    `yaml:"max_inflight"`
+	Name          string `yaml:"name"`
+	Engine        string `yaml:"engine"` // "openai_http" | "bifrost"
+	URL           string `yaml:"url"`    // openai_http base URL; bifrost optional OpenAI-compatible override
+	MaxInflight   int    `yaml:"max_inflight"`
+	Provider      string `yaml:"provider"`       // bifrost only
+	UpstreamModel string `yaml:"upstream_model"` // bifrost only
+	APIKeyEnv     string `yaml:"api_key_env"`    // bifrost only: env var name
 }
 
 type Config struct {

@@ -5,3 +5,9 @@ models:
     engine: openai_http     # any OpenAI-compatible server (ollama, vllm, llama.cpp)
     url: http://localhost:11434
     max_inflight: 4
+#  - name: claude-sonnet
+#    engine: bifrost
+#    provider: anthropic
+#    upstream_model: claude-sonnet-5
+#    api_key_env: ANTHROPIC_API_KEY
+#    max_inflight: 8

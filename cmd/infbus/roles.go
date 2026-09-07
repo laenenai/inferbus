@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/infbus/infbus/internal/engine"
+	"github.com/infbus/infbus/internal/engine/bifrostengine"
 	"github.com/infbus/infbus/internal/engine/openaihttp"
 	"github.com/infbus/infbus/internal/gateway"
 	"github.com/infbus/infbus/internal/wire"
@@ -109,6 +110,18 @@ func runWorker(args []string, stdout io.Writer) int {
 		switch mc.Engine {
 		case "openai_http", "":
 			engines[mc.Name] = openaihttp.New(mc.URL, nil)
+		case "bifrost":
+			e, err := bifrostengine.New(bifrostengine.Config{
+				Provider: mc.Provider,
+				Model:    mc.UpstreamModel,
+				APIKey:   os.Getenv(mc.APIKeyEnv),
+				BaseURL:  mc.URL,
+			})
+			if err != nil {
+				fmt.Fprintf(stdout, "worker: model %s: %v\n", mc.Name, err)
+				return 1
+			}
+			engines[mc.Name] = e
 		default:
 			fmt.Fprintf(stdout, "worker: model %s: unknown engine %q\n", mc.Name, mc.Engine)
 			return 1
