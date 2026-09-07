@@ -148,7 +148,11 @@ var Decider = es.Decider[*controlplanev1.ApiKey, *controlplanev1.ApiKeyCommand, 
 			ns.Project = c.GetProject()
 			ns.Name = c.GetName()
 			ns.Hash = c.GetHash()
-			ns.Allow = c.GetAllow()
+			// Defensive copy: the event's Allow slice aliases the command's
+			// (and thus, ultimately, the caller's) backing array. Without a
+			// copy, mutating the caller's slice after Handle returns would
+			// mutate Result.State.
+			ns.Allow = append([]string(nil), c.GetAllow()...)
 			ns.RateLimitRpm = c.GetRateLimitRpm()
 			ns.MonthlyTokenBudget = c.GetMonthlyTokenBudget()
 			ns.Disabled = false
@@ -160,7 +164,8 @@ var Decider = es.Decider[*controlplanev1.ApiKey, *controlplanev1.ApiKeyCommand, 
 			ns.Disabled = true
 
 		case *controlplanev1.ApiKeyEvent_AllowlistChanged:
-			ns.Allow = k.AllowlistChanged.GetAllow()
+			// Defensive copy: see the Created arm above.
+			ns.Allow = append([]string(nil), k.AllowlistChanged.GetAllow()...)
 
 		case *controlplanev1.ApiKeyEvent_LimitsChanged:
 			ns.RateLimitRpm = k.LimitsChanged.GetRateLimitRpm()

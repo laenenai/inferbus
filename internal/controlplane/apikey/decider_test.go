@@ -332,6 +332,36 @@ func TestAllowlistAndLimitsFoldIntoState(t *testing.T) {
 	}
 }
 
+// TestAllowSliceNotAliased proves Evolve defensively copies the Allow
+// slice rather than aliasing the caller's backing array: mutating the
+// slice passed into a command after Handle returns must never change
+// Result.State. Covers both the Created and AllowlistChanged Evolve arms.
+func TestAllowSliceNotAliased(t *testing.T) {
+	ctx := context.Background()
+	rt := newRuntime(t)
+	stream := sid(t, "key-1")
+
+	allow := []string{"fast", "smart"}
+	res, err := rt.Handle(ctx, stream, createCmd("key-1", "acme", "proj-1", "prod key", "hash-1", allow, 60, 1000), es.Meta{})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	allow[0] = "MUTATED"
+	if got := res.State.GetAllow()[0]; got != "fast" {
+		t.Fatalf("state.Allow[0] after create = %q, want unaliased %q", got, "fast")
+	}
+
+	allow2 := []string{"fast", "smart"}
+	res, err = rt.Handle(ctx, stream, setAllowlistCmd(allow2), es.Meta{})
+	if err != nil {
+		t.Fatalf("set allowlist: %v", err)
+	}
+	allow2[0] = "MUTATED"
+	if got := res.State.GetAllow()[0]; got != "fast" {
+		t.Fatalf("state.Allow[0] after set allowlist = %q, want unaliased %q", got, "fast")
+	}
+}
+
 // TestFullFold runs a full command sequence including a rotate before
 // disable, and confirms Load — a fresh fold from the log — reconstructs
 // the expected final state.
