@@ -1,0 +1,149 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+    body{margin:0;background:#0d0d0d;color:#ffffff;font:13px/1.45 'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased}
+    a{color:#3987e5;text-decoration:none}a:hover{color:#5598e7}
+    .mono{font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace}
+    .num{font-variant-numeric:tabular-nums;font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace}
+    .navitem{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;color:#c3c2b7;font-size:13px}
+    .navitem.active{background:rgba(57,135,229,0.13);color:#ffffff}
+    .navitem svg{flex:none}
+    .card{background:#1a1a19;border:1px solid rgba(255,255,255,0.08);border-radius:8px}
+    .mchip{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:4px;background:#222220;border:1px solid rgba(255,255,255,0.08);font-size:11px;color:#c3c2b7;font-family:'IBM Plex Mono',ui-monospace,monospace}
+    table{border-collapse:collapse;width:100%}
+    th{font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#898781;font-weight:500;text-align:left;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.08)}
+    td{padding:12px;border-bottom:1px solid rgba(255,255,255,0.06);font-size:12.5px;color:#c3c2b7;vertical-align:middle}
+    tr:last-child td{border-bottom:none}
+  </style>
+</helmet>
+<div style="width:1440px;height:900px;overflow:hidden;display:flex;background:#0d0d0d">
+  <div style="width:212px;flex:none;display:flex;flex-direction:column;background:#111110;border-right:1px solid rgba(255,255,255,0.08)">
+    <div style="display:flex;align-items:center;gap:9px;padding:18px 16px 14px 16px">
+      <svg width="20" height="20" viewBox="0 0 26 26" fill="none"><rect x="1.5" y="1.5" width="23" height="23" rx="5" stroke="#3987e5" stroke-width="2"/><path d="M6.5 15.5 10 9l3 6 3-6 3.5 6.5" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="mono" style="font-size:15px;font-weight:500;color:#ffffff">inferbus</span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:2px;padding:8px 10px">
+      <div class="navitem"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 13.5h12M3 10.5l3-3.5 2.5 2L13 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Usage</span></div>
+      <div class="navitem"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="5.5" cy="10.5" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M8 8.5 13.5 3M11 5.5l2 2M12.5 4l1.5 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>API keys</span></div>
+      <div class="navitem"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 7V3.5A1.5 1.5 0 0 1 3.5 2H7l7 7-5 5-7-7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="5" cy="5" r="1" fill="currentColor"/></svg><span>Aliases</span></div>
+      <div class="navitem active"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2.5" width="12" height="4.5" rx="1.2" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="9" width="12" height="4.5" rx="1.2" stroke="currentColor" stroke-width="1.5"/><circle cx="4.6" cy="4.75" r="0.9" fill="currentColor"/><circle cx="4.6" cy="11.25" r="0.9" fill="currentColor"/></svg><span>Workers</span></div>
+      <div class="navitem"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4.5h8M13 4.5h1M2 11.5h1M6 11.5h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="11.5" cy="4.5" r="1.7" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="11.5" r="1.7" stroke="currentColor" stroke-width="1.5"/></svg><span>Settings</span></div>
+    </div>
+    <div style="margin-top:auto;padding:14px 16px;border-top:1px solid rgba(255,255,255,0.07);display:flex;flex-direction:column;gap:4px">
+      <span class="mono" style="font-size:11px;color:#898781">v0.4.2 &middot; nats: connected</span>
+      <a href="#" style="font-size:11.5px">Documentation</a>
+    </div>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+    <div style="height:54px;flex:none;display:flex;align-items:center;gap:10px;padding:0 20px;border-bottom:1px solid rgba(255,255,255,0.08)">
+      <div style="display:flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid rgba(255,255,255,0.10);border-radius:6px;font-size:12.5px;color:#ffffff"><span style="width:16px;height:16px;border-radius:4px;background:#262624;display:inline-flex;align-items:center;justify-content:center;font-size:9.5px;color:#c3c2b7">A</span><span>acme-corp</span><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="m2.5 4 2.5 2.5L7.5 4" stroke="#898781" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div style="display:flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid rgba(255,255,255,0.10);border-radius:6px;font-size:12.5px;color:#c3c2b7"><span style="color:#898781">project:</span><span style="color:#ffffff">production</span><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="m2.5 4 2.5 2.5L7.5 4" stroke="#898781" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:9px">
+        <span style="width:26px;height:26px;border-radius:50%;background:#26404f;display:inline-flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:600;color:#9ec5f4">SV</span>
+        <div style="display:flex;flex-direction:column;line-height:1.25">
+          <span style="font-size:12px;color:#ffffff">sam@acme.dev</span>
+          <span style="font-size:10.5px;color:#898781">org owner &middot; via OIDC</span>
+        </div>
+      </div>
+    </div>
+    <div style="flex:1;padding:20px;display:flex;flex-direction:column;gap:14px;min-height:0">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:2px">
+          <span style="font-size:17px;font-weight:600;color:#ffffff">Workers</span>
+          <span style="font-size:12px;color:#898781">Live from MODELS KV heartbeats &middot; refreshed 2 s ago</span>
+        </div>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid rgba(255,255,255,0.10);border-radius:6px;font-size:12px;color:#c3c2b7"><span>All regions</span><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="m2.5 4 2.5 2.5L7.5 4" stroke="#898781" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(4, minmax(0, 1fr));gap:14px">
+        <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#898781">Workers online</span>
+          <span style="font-size:25px;font-weight:600;color:#ffffff">5 <span style="font-size:13px;font-weight:400;color:#898781">of 6</span></span>
+        </div>
+        <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#898781">Models served</span>
+          <span style="font-size:25px;font-weight:600;color:#ffffff">6</span>
+        </div>
+        <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#898781">In-flight requests</span>
+          <span style="font-size:25px;font-weight:600;color:#ffffff">42 <span style="font-size:13px;font-weight:400;color:#898781">/ 96 max</span></span>
+        </div>
+        <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#898781">Deepest queue</span>
+          <span style="font-size:25px;font-weight:600;color:#ffffff">17 <span style="font-size:13px;font-weight:400;color:#898781">&middot; llama-70b</span></span>
+        </div>
+      </div>
+      <div class="card" style="overflow:hidden;flex:1;min-height:0">
+        <table>
+          <thead><tr><th>Worker</th><th>Host</th><th>Models &middot; in-flight</th><th style="width:170px">Capacity</th><th style="text-align:right">Heartbeat</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="mono" style="color:#ffffff">gpu-node-01</td>
+              <td class="mono" style="color:#898781">10.0.4.11</td>
+              <td><span style="display:inline-flex;gap:6px;flex-wrap:wrap"><span class="mchip">llama-70b <span style="color:#ffffff">12/16</span></span><span class="mchip">qwen-7b <span style="color:#ffffff">3/8</span></span></span></td>
+              <td><span style="display:inline-flex;align-items:center;gap:8px"><span style="width:88px;height:5px;border-radius:3px;background:#2c2c2a;display:inline-block;overflow:hidden"><span style="display:block;width:63%;height:100%;background:#3987e5"></span></span><span class="num" style="font-size:11px">15/24</span></span></td>
+              <td class="num" style="text-align:right">2 s</td>
+              <td><span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px"><span style="width:7px;height:7px;border-radius:50%;background:#0ca30c;display:inline-block"></span>Online</span></td>
+            </tr>
+            <tr>
+              <td class="mono" style="color:#ffffff">gpu-node-02</td>
+              <td class="mono" style="color:#898781">10.0.4.12</td>
+              <td><span style="display:inline-flex;gap:6px;flex-wrap:wrap"><span class="mchip">llama-70b <span style="color:#ffffff">9/16</span></span><span class="mchip">qwen-72b <span style="color:#ffffff">2/4</span></span></span></td>
+              <td><span style="display:inline-flex;align-items:center;gap:8px"><span style="width:88px;height:5px;border-radius:3px;background:#2c2c2a;display:inline-block;overflow:hidden"><span style="display:block;width:55%;height:100%;background:#3987e5"></span></span><span class="num" style="font-size:11px">11/20</span></span></td>
+              <td class="num" style="text-align:right">4 s</td>
+              <td><span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px"><span style="width:7px;height:7px;border-radius:50%;background:#0ca30c;display:inline-block"></span>Online</span></td>
+            </tr>
+            <tr>
+              <td class="mono" style="color:#ffffff">gpu-node-03</td>
+              <td class="mono" style="color:#898781">10.0.4.13</td>
+              <td><span style="display:inline-flex;gap:6px;flex-wrap:wrap"><span class="mchip">llama-70b <span style="color:#ffffff">4/16</span></span></span></td>
+              <td><span style="display:inline-flex;align-items:center;gap:8px"><span style="width:88px;height:5px;border-radius:3px;background:#2c2c2a;display:inline-block;overflow:hidden"><span style="display:block;width:25%;height:100%;background:#3987e5"></span></span><span class="num" style="font-size:11px">4/16</span></span></td>
+              <td class="num" style="text-align:right">3 s</td>
+              <td><span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#c3c2b7"><svg width="11" height="11" viewBox="0 0 11 11" fill="none"><circle cx="5.5" cy="5.5" r="4.2" stroke="#fab219" stroke-width="1.4"/><path d="M5.5 3.2v2.6l1.7 1" stroke="#fab219" stroke-width="1.4" stroke-linecap="round"/></svg>Draining &middot; 4 finishing</span></td>
+            </tr>
+            <tr>
+              <td class="mono" style="color:#ffffff">mac-studio-01</td>
+              <td class="mono" style="color:#898781">10.0.5.20</td>
+              <td><span style="display:inline-flex;gap:6px;flex-wrap:wrap"><span class="mchip">qwen-7b-mlx <span style="color:#ffffff">1/4</span></span><span class="mchip">qwen-1.5b <span style="color:#ffffff">0/8</span></span></span></td>
+              <td><span style="display:inline-flex;align-items:center;gap:8px"><span style="width:88px;height:5px;border-radius:3px;background:#2c2c2a;display:inline-block;overflow:hidden"><span style="display:block;width:8%;height:100%;background:#3987e5"></span></span><span class="num" style="font-size:11px">1/12</span></span></td>
+              <td class="num" style="text-align:right">1 s</td>
+              <td><span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px"><span style="width:7px;height:7px;border-radius:50%;background:#0ca30c;display:inline-block"></span>Online</span></td>
+            </tr>
+            <tr>
+              <td class="mono" style="color:#ffffff">embed-node-01</td>
+              <td class="mono" style="color:#898781">10.0.4.30</td>
+              <td><span style="display:inline-flex;gap:6px;flex-wrap:wrap"><span class="mchip">bge-m3 <span style="color:#ffffff">11/24</span></span></span></td>
+              <td><span style="display:inline-flex;align-items:center;gap:8px"><span style="width:88px;height:5px;border-radius:3px;background:#2c2c2a;display:inline-block;overflow:hidden"><span style="display:block;width:46%;height:100%;background:#3987e5"></span></span><span class="num" style="font-size:11px">11/24</span></span></td>
+              <td class="num" style="text-align:right">2 s</td>
+              <td><span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px"><span style="width:7px;height:7px;border-radius:50%;background:#0ca30c;display:inline-block"></span>Online</span></td>
+            </tr>
+            <tr>
+              <td class="mono" style="color:#898781">gpu-node-04</td>
+              <td class="mono" style="color:#898781">10.0.4.14</td>
+              <td><span style="display:inline-flex;gap:6px;flex-wrap:wrap;opacity:0.5"><span class="mchip">qwen-72b <span>&mdash;</span></span></span></td>
+              <td><span style="display:inline-flex;align-items:center;gap:8px;opacity:0.5"><span style="width:88px;height:5px;border-radius:3px;background:#2c2c2a;display:inline-block"></span><span class="num" style="font-size:11px">&mdash;</span></span></td>
+              <td class="num" style="text-align:right;color:#d03b3b">93 s</td>
+              <td><span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#c3c2b7"><svg width="11" height="11" viewBox="0 0 11 11" fill="none"><path d="M5.5 1.2 10.4 9.6H0.6L5.5 1.2Z" stroke="#d03b3b" stroke-width="1.3" stroke-linejoin="round"/><path d="M5.5 4.4v2.2M5.5 8.2v0.2" stroke="#d03b3b" stroke-width="1.3" stroke-linecap="round"/></svg>Stale &middot; TTL expiring</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="font-size:11.5px;color:#898781">A worker whose heartbeat passes the KV TTL is dropped from the registry; its unacked requests redeliver to peers serving the same model.</div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

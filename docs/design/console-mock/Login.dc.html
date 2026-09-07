@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+    body{margin:0;background:#0d0d0d;color:#ffffff;font:13px/1.45 'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased}
+    a{color:#3987e5;text-decoration:none}a:hover{color:#5598e7}
+    .mono{font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace}
+  </style>
+</helmet>
+<div style="width:1440px;height:900px;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;background:#0d0d0d">
+  <div style="display:flex;flex-direction:column;align-items:center;gap:10px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <svg width="26" height="26" viewBox="0 0 26 26" fill="none"><rect x="1.5" y="1.5" width="23" height="23" rx="5" stroke="#3987e5" stroke-width="2"/><path d="M6.5 15.5 10 9l3 6 3-6 3.5 6.5" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div class="mono" style="font-size:21px;font-weight:500;letter-spacing:0.01em;color:#ffffff">inferbus</div>
+    </div>
+    <div style="font-size:12.5px;color:#898781">inference bus &middot; management console</div>
+  </div>
+  <div style="width:384px;background:#1a1a19;border:1px solid rgba(255,255,255,0.09);border-radius:10px;padding:32px;display:flex;flex-direction:column;gap:20px">
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <div style="font-size:17px;font-weight:600;color:#ffffff">Sign in</div>
+      <div style="font-size:12.5px;color:#898781;line-height:1.5">Access is managed by your organization&rsquo;s identity provider.</div>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:center;gap:9px;background:#3987e5;border-radius:6px;padding:11px 0;font-size:13.5px;font-weight:500;color:#ffffff;cursor:pointer">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5 13.5 3.8v3.4c0 3.2-2.3 5.9-5.5 7.3-3.2-1.4-5.5-4.1-5.5-7.3V3.8L8 1.5Z" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/><path d="m5.8 7.9 1.6 1.6 2.8-3" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Continue with SSO</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;padding:9px 12px;background:#141413;border:1px solid rgba(255,255,255,0.07);border-radius:6px">
+      <span style="width:7px;height:7px;border-radius:50%;background:#0ca30c;display:inline-block"></span>
+      <span style="font-size:11.5px;color:#c3c2b7">Issuer</span>
+      <span class="mono" style="font-size:11.5px;color:#c3c2b7">auth.example.com</span>
+      <span style="margin-left:auto;font-size:10.5px;letter-spacing:0.06em;color:#898781">OIDC</span>
+    </div>
+    <div style="border-top:1px solid rgba(255,255,255,0.07);padding-top:14px;font-size:11.5px;color:#898781;line-height:1.55">API keys grant data-plane access only and cannot sign in to the console.</div>
+  </div>
+  <div style="font-size:11.5px;color:#898781">Trouble signing in? Contact an org owner. &middot; <a href="#">Documentation</a></div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

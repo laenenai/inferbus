@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race)
+        run: go test ./... -race
+      - name: Branding check
+        run: |
+          ! grep -riIE 'butler|\bporter\b' --exclude-dir=.git --exclude-dir=.github --exclude=design.md --exclude=Taskfile.yml . \
+            || (echo 'branding leak' && exit 1)
+          ! grep -rhiIoE 'laenen[a-z_-]*' --exclude-dir=.git --exclude-dir=.github --exclude=design.md --exclude=Taskfile.yml . \
+            | grep -ivx 'laenenai' | grep -q . \
+            || (echo 'internal branding leak (non-laenenai laenen ref)' && exit 1)
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build container image
+        run: docker build -f deploy/Dockerfile -t inferbus-ci .

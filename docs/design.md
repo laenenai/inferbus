@@ -6,11 +6,11 @@
 
 ## 1. Context & motivation
 
-The private `laenenai/inference` repo is a scaffold for a NATS-native inference platform. This spec defines a **fresh public open-source project** that realizes the target vision:
+This project was designed from scratch as a public, NATS-native inference platform, informed by an earlier private scaffold. This spec defines the project that realizes the target vision:
 
 > An OpenAI-compatible gateway that accepts **alias-based** model requests with **full IAM**, forwards work over **NATS** to **workers** that route through **embedded Bifrost** to local or remote LLMs, with workers publishing **usage events** onto the bus and a **harvester** persisting them into **ClickHouse** for observability and accounting.
 
-The laenen platform will consume this project as an upstream dependency. The private repo is the porting source, not the destination.
+The original private scaffold served as the porting source, not the destination; upstream consumers depend on this public project.
 
 ## 2. Goals
 
@@ -22,7 +22,7 @@ The laenen platform will consume this project as an upstream dependency. The pri
 - Embedded Bifrost in the worker for provider routing (vLLM, llama.cpp, Ollama, MLX, OpenAI, Anthropic, …).
 - Usage pipeline: worker → `METERING` stream → harvester → ClickHouse; budgets and dashboards read ClickHouse.
 - Single Go module, single multi-command binary, one-command `docker compose` quickstart.
-- Zero references to laenen/butler; zero private dependencies.
+- Zero references to internal platforms; zero private dependencies.
 
 ## 3. Non-goals (v1)
 
@@ -37,7 +37,7 @@ The laenen platform will consume this project as an upstream dependency. The pri
 
 | # | Decision | Choice |
 |---|----------|--------|
-| 1 | OSS strategy | Fresh public repo/org; laenen consumes upstream |
+| 1 | OSS strategy | Fresh public repo/org; internal platform consumes upstream |
 | 2 | Crypto plane | Dropped; TLS + NATS accounts |
 | 3 | IAM (data plane) | Gateway-managed API keys under orgs/projects, Postgres-backed |
 | 4 | IAM (control plane) | OIDC for humans on console/admin API (two-tier auth) |
@@ -190,7 +190,7 @@ inferbus/
 - `docker compose up` quickstart: NATS (JetStream), Postgres, ClickHouse, gateway, one worker configured for a local Ollama, harvester. First-run bootstrap creates an org, a project, one API key (printed once), and a starter alias.
 - Observability: OTEL traces/metrics on all roles (no-op without `OTEL_EXPORTER_OTLP_ENDPOINT`), Prometheus-format `/metrics` optional.
 
-## 14. Porting plan (from `laenenai/inference`)
+## 14. Porting plan (from the private scaffold)
 
 | Source | Destination | Notes |
 |---|---|---|
@@ -201,9 +201,9 @@ inferbus/
 | `internal/rollup`, `cmd/metering-rollup` | — | Dropped (ClickHouse harvester replaces; consumer skeleton reusable) |
 | `pkg/extract`, `pkg/normalize`, `pkg/eval`, `toolrun`, `engines/gliner` | — | Stay private |
 | keyd/natskit usage | `internal/platform` | Rewritten helpers; no crypto |
-| `cmd/inference-e2e` | `test/e2e` | Port harness; scrub laenen prompt strings |
+| `cmd/inference-e2e` | `test/e2e` | Port harness; scrub internal prompt strings |
 
-**De-branding checklist:** new module path; remove all `butler` comments (9 sites), laenen strings in e2e prompts, image names in Taskfile/deploy; README rewritten standalone; ADR/spec references to the private `architecture` repo replaced by `docs/` in-repo.
+**De-branding checklist:** new module path; remove internal-caller comments and internal strings in e2e prompts and image names; README rewritten standalone; internal ADR/spec references replaced by `docs/` in-repo.
 
 ## 15. Testing
 
@@ -225,4 +225,4 @@ inferbus/
 
 - Final project name/org (working name `inferbus`).
 - Bifrost config surface: how much of Bifrost's provider config to expose verbatim in worker YAML vs. wrap (decide at M2 with real Bifrost API in hand).
-- Whether laenen's private crypto plane returns as a middleware seam upstream or stays a private fork concern.
+- Whether a private crypto plane returns as a middleware seam upstream or stays a downstream-fork concern.

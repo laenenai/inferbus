@@ -1,21 +1,45 @@
 # inferbus
 
-inferbus is an open-source, OpenAI-compatible inference gateway built on
-[NATS](https://nats.io) JetStream. Clients speak the standard OpenAI HTTP API
-against a **gateway**, which resolves a caller's API key to an org/project and
-translates a caller-facing **alias** (e.g. `fast`) to a concrete backend model,
-then queues the request as a durable work item. A fleet of **workers** pulls
-requests off that queue, runs them through a pluggable **engine** — a plain
-OpenAI-compatible HTTP endpoint (Ollama, vLLM, llama.cpp) or the embedded
+**The inference bus — an OpenAI-compatible gateway that queues, routes, and
+meters LLM traffic over [NATS](https://nats.io) JetStream.**
+
+[![ci](https://github.com/laenenai/inferbus/actions/workflows/ci.yml/badge.svg)](https://github.com/laenenai/inferbus/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/laenenai/inferbus.svg)](https://pkg.go.dev/github.com/laenenai/inferbus)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+Clients speak the standard OpenAI HTTP API against a **gateway**, which
+resolves a caller's API key to an org/project and translates a caller-facing
+**alias** (e.g. `fast`) to a concrete backend model, then queues the request
+as a durable work item. A fleet of **workers** pulls requests off that queue,
+runs them through a pluggable **engine** — a plain OpenAI-compatible HTTP
+endpoint (Ollama, vLLM, llama.cpp) or the embedded
 [Bifrost](https://github.com/maximhq/bifrost) multi-provider router — and
 streams the response back to the gateway over core NATS, which relays it to
 the client as SSE. Workers also emit per-request usage events onto a
-`METERING` stream, destined for a ClickHouse-backed accounting pipeline. A
-Postgres-backed control plane for keys/aliases/orgs is planned; today the
-gateway's IAM and alias table are static YAML.
+`METERING` stream, destined for a ClickHouse-backed accounting pipeline.
+
+## Why inferbus
+
+- **Drop-in OpenAI surface** — point any OpenAI SDK at the gateway; streaming
+  and non-streaming chat completions work unchanged.
+- **A queue, not a proxy** — requests are durable JetStream work items:
+  bursts buffer instead of failing, a crashed worker's request is retried
+  exactly once, and per-model backlogs are observable (the basis for
+  admission control and autoscaling).
+- **Aliases as the public vocabulary** — clients ask for `fast` or `smart`;
+  operators re-point aliases at concrete models without touching callers.
+- **Workers with zero control-plane coupling** — a GPU node needs a NATS URL
+  and its engine endpoints. No database, no credentials beyond its providers'.
+- **Three-phase cancellation** — queued requests are deleted before pickup,
+  mid-generation requests are stopped via a cancel subject, and a deadline
+  header backstops everything; canceled work never redelivers.
+- **Metering built in** — every request (success, error, or cancel) emits a
+  usage event with tokens, TTFT, queue time, and provider attribution.
 
 **Status:** pre-alpha (M2 — data path). See [docs/design.md](docs/design.md)
-for the full design spec and milestone plan.
+for the full design spec and milestone plan, and
+[docs/design/console-mock](docs/design/console-mock) for the management
+console design (Design Component artboards for the planned v2 console).
 
 ## Architecture
 
@@ -30,19 +54,17 @@ for the full design spec and milestone plan.
    client (OpenAI SDK)
         │ HTTP/SSE
         ▼
-   ┌─────────┐  publish   ┌──────────────────────┐  pull   ┌────────┐  Chat/ChatStream  ┌───────────────────────┐
-   │ gateway │──────────▶ │ JetStream INFERENCE  │────────▶│ worker │──────────────────▶│ engine                │
-   │ auth    │            │ (work-queue,         │         │        │                   │ openai_http: Ollama,  │
-   │ alias   │            │  consumer per model) │         │        │                   │ vLLM, llama.cpp       │
-   │ resolve │            └──────────────────────┘         │        │                   │ bifrost: embedded     │
-   │ admission (planned) │                                 │        │                   │ multi-provider router │
-   └─────────┘ ◀──────────────── core NATS ─────────────────┘       └───────────────────────┘
-        │        inference.resp.<req_id>  {chunk|done|result|error}      │
-        ▼                                                                │ publish usage
-      SSE to client                                                      ▼
-                                                        JetStream METERING ──pull──▶ harvester (planned) ──▶ ClickHouse (planned)
-                                                                                             ▲
-                                                              NATS KV: MODELS (planned worker advertise)
+   ┌───────────┐  publish  ┌──────────────────────┐  pull  ┌────────┐  Chat/ChatStream ┌───────────────────────┐
+   │ gateway   │──────────▶│ JetStream INFERENCE  │───────▶│ worker │─────────────────▶│ engine                │
+   │  auth     │           │ (work-queue,         │        │        │                  │ openai_http: Ollama,  │
+   │  alias    │           │  consumer per model) │        │        │                  │  vLLM, llama.cpp      │
+   │  resolve  │           └──────────────────────┘        │        │                  │ bifrost: embedded     │
+   └───────────┘                                           │        │                  │  multi-provider router│
+        │  ▲                                               │        │                  └───────────────────────┘
+        │  └──────────────── core NATS ────────────────────┘        │
+        │      inference.resp.<req_id> {chunk|done|result|error}    │ publish usage
+        ▼                                                           ▼
+      SSE to client                    JetStream METERING ──pull──▶ harvester (planned) ──▶ ClickHouse (planned)
 ```
 
 **Data plane (built).** The gateway authenticates the caller's API key against
@@ -203,5 +225,24 @@ task check   # go vet, go test -race, and a branding grep
 
 The test suite runs against an embedded, in-process JetStream server
 (`internal/testutil.RunNATS`) — no Docker or external services required.
+CI runs vet, the race-enabled suite, a branding check, and a container build
+on every push and pull request.
+
+## Roadmap
+
+| Milestone | Scope |
+|---|---|
+| **M3** | Control plane: orgs/projects/keys/aliases with an admin API, NATS KV alias projection watched live by gateways, OIDC on admin routes |
+| **M4** | Usage pipeline: `harvester` consuming `METERING` into ClickHouse; budget enforcement reads |
+| **M5** | Hardening: admission control from queue depth, request logging/metrics, docs |
+| **v1.5** | Priority tiers, claim-check for large payloads |
+| **v2** | Management console (see [the design mock](docs/design/console-mock)) |
+
+## Contributing
+
+Issues and pull requests are welcome. Before submitting a PR, run
+`task check` locally — CI enforces the same gates. The design spec in
+[docs/design.md](docs/design.md) is the authority for wire-contract and
+architectural changes; propose spec changes in an issue first.
 
 Licensed under [Apache-2.0](LICENSE).

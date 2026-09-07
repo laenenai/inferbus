@@ -1,0 +1,18 @@
+{
+  "artboards": [
+    { "file": "Login.dc.html", "title": "Sign in", "x": 0, "y": 0, "w": 1440, "h": 900 },
+    { "file": "Main.dc.html", "title": "Usage dashboard", "x": 1560, "y": 0, "w": 1440, "h": 900 },
+    { "file": "Keys.dc.html", "title": "API keys", "x": 0, "y": 1080, "w": 1440, "h": 900 },
+    { "file": "Aliases.dc.html", "title": "Aliases", "x": 1560, "y": 1080, "w": 1440, "h": 900 },
+    { "file": "Fleet.dc.html", "title": "Worker fleet", "x": 0, "y": 2160, "w": 1440, "h": 900 }
+  ],
+  "annotations": [
+    { "id": "overview", "x": 1560, "y": 2260, "w": 420, "text": "inferbus console — v1 mockup (static).\nEvery screen maps 1:1 to the /admin/v1/* API in the 2026-09-07 design spec. Humans sign in via OIDC; API keys are data-plane only." },
+    { "id": "note-login", "x": 0, "y": -110, "w": 360, "text": "OIDC only — no API-key sign-in.\nRoles resolve from org_members / platform_admins (spec §9.2)." },
+    { "id": "note-usage", "x": 1560, "y": -110, "w": 380, "text": "GET /admin/v1/usage?window=7d\nAggregates come from the ClickHouse materialized views (spec §10). Budget bars read usage_daily_by_key." },
+    { "id": "note-keys", "x": 0, "y": 970, "w": 380, "text": "GET/POST /admin/v1/keys · rotate/disable via POST /admin/v1/keys/{id}/rotate|disable (spec §9.1).\nAllowlist chips = aliases, never concrete models." },
+    { "id": "note-aliases", "x": 1560, "y": 970, "w": 400, "text": "GET/PUT/DELETE /admin/v1/aliases (global + org scope) · POST /admin/v1/aliases/resync.\nProjection column shows ALIASES KV write-through state (spec §6.1)." },
+    { "id": "note-fleet", "x": 0, "y": 2050, "w": 380, "text": "GET /admin/v1/workers — read-through of the MODELS KV heartbeat bucket (spec §6.2). Read-only: workers are configured by their local YAML, not from the console." }
+  ],
+  "launch": { "view": "canvas" }
+}

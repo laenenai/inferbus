@@ -1,0 +1,198 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+    body{margin:0;background:#0d0d0d;color:#ffffff;font:13px/1.45 'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased}
+    a{color:#3987e5;text-decoration:none}a:hover{color:#5598e7}
+    .mono{font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace}
+    .num{font-variant-numeric:tabular-nums;font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace}
+    .navitem{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:6px;color:#c3c2b7;font-size:13px}
+    .navitem.active{background:rgba(57,135,229,0.13);color:#ffffff}
+    .navitem svg{flex:none}
+    .card{background:#1a1a19;border:1px solid rgba(255,255,255,0.08);border-radius:8px}
+    .seg{padding:5px 12px;font-size:12px;color:#898781;border-radius:5px}
+    .seg.on{background:#262624;color:#ffffff}
+    table{border-collapse:collapse;width:100%}
+    th{font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#898781;font-weight:500;text-align:left;padding:7px 12px;border-bottom:1px solid rgba(255,255,255,0.08)}
+    td{padding:9px 12px;border-bottom:1px solid rgba(255,255,255,0.06);font-size:12.5px;color:#c3c2b7;vertical-align:middle}
+    tr:last-child td{border-bottom:none}
+  </style>
+</helmet>
+<div style="width:1440px;height:900px;overflow:hidden;display:flex;background:#0d0d0d">
+  <div style="width:212px;flex:none;display:flex;flex-direction:column;background:#111110;border-right:1px solid rgba(255,255,255,0.08)">
+    <div style="display:flex;align-items:center;gap:9px;padding:18px 16px 14px 16px">
+      <svg width="20" height="20" viewBox="0 0 26 26" fill="none"><rect x="1.5" y="1.5" width="23" height="23" rx="5" stroke="#3987e5" stroke-width="2"/><path d="M6.5 15.5 10 9l3 6 3-6 3.5 6.5" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="mono" style="font-size:15px;font-weight:500;color:#ffffff">inferbus</span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:2px;padding:8px 10px">
+      <div class="navitem active"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 13.5h12M3 10.5l3-3.5 2.5 2L13 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Usage</span></div>
+      <div class="navitem"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="5.5" cy="10.5" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M8 8.5 13.5 3M11 5.5l2 2M12.5 4l1.5 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>API keys</span></div>
+      <div class="navitem"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 7V3.5A1.5 1.5 0 0 1 3.5 2H7l7 7-5 5-7-7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="5" cy="5" r="1" fill="currentColor"/></svg><span>Aliases</span></div>
+      <div class="navitem"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2.5" width="12" height="4.5" rx="1.2" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="9" width="12" height="4.5" rx="1.2" stroke="currentColor" stroke-width="1.5"/><circle cx="4.6" cy="4.75" r="0.9" fill="currentColor"/><circle cx="4.6" cy="11.25" r="0.9" fill="currentColor"/></svg><span>Workers</span></div>
+      <div class="navitem"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4.5h8M13 4.5h1M2 11.5h1M6 11.5h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="11.5" cy="4.5" r="1.7" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="11.5" r="1.7" stroke="currentColor" stroke-width="1.5"/></svg><span>Settings</span></div>
+    </div>
+    <div style="margin-top:auto;padding:14px 16px;border-top:1px solid rgba(255,255,255,0.07);display:flex;flex-direction:column;gap:4px">
+      <span class="mono" style="font-size:11px;color:#898781">v0.4.2 &middot; nats: connected</span>
+      <a href="#" style="font-size:11.5px">Documentation</a>
+    </div>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+    <div style="height:54px;flex:none;display:flex;align-items:center;gap:10px;padding:0 20px;border-bottom:1px solid rgba(255,255,255,0.08)">
+      <div style="display:flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid rgba(255,255,255,0.10);border-radius:6px;font-size:12.5px;color:#ffffff"><span style="width:16px;height:16px;border-radius:4px;background:#262624;display:inline-flex;align-items:center;justify-content:center;font-size:9.5px;color:#c3c2b7">A</span><span>acme-corp</span><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="m2.5 4 2.5 2.5L7.5 4" stroke="#898781" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div style="display:flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid rgba(255,255,255,0.10);border-radius:6px;font-size:12.5px;color:#c3c2b7"><span style="color:#898781">project:</span><span style="color:#ffffff">production</span><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="m2.5 4 2.5 2.5L7.5 4" stroke="#898781" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:9px">
+        <span style="width:26px;height:26px;border-radius:50%;background:#26404f;display:inline-flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:600;color:#9ec5f4">SV</span>
+        <div style="display:flex;flex-direction:column;line-height:1.25">
+          <span style="font-size:12px;color:#ffffff">sam@acme.dev</span>
+          <span style="font-size:10.5px;color:#898781">org owner &middot; via OIDC</span>
+        </div>
+      </div>
+    </div>
+    <div style="flex:1;padding:20px;display:flex;flex-direction:column;gap:14px;min-height:0">
+      <div style="display:flex;align-items:center;gap:12px">
+        <span style="font-size:17px;font-weight:600;color:#ffffff">Usage</span>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:2px;background:#1a1a19;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:2px">
+          <span class="seg">24h</span><span class="seg on">7d</span><span class="seg">30d</span><span class="seg">MTD</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid rgba(255,255,255,0.10);border-radius:6px;font-size:12px;color:#c3c2b7"><span>All models</span><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="m2.5 4 2.5 2.5L7.5 4" stroke="#898781" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(4, minmax(0, 1fr));gap:14px">
+        <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#898781">Tokens &middot; 7d</span>
+          <span style="font-size:25px;font-weight:600;color:#ffffff">348.2M</span>
+          <span style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#0ca30c"><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M5 8.5v-7M2 4.5 5 1.5l3 3" stroke="#0ca30c" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>12.4% vs prior 7d</span>
+        </div>
+        <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#898781">Requests &middot; 7d</span>
+          <span style="font-size:25px;font-weight:600;color:#ffffff">1.28M</span>
+          <span style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#0ca30c"><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M5 8.5v-7M2 4.5 5 1.5l3 3" stroke="#0ca30c" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>8.9% vs prior 7d</span>
+        </div>
+        <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#898781">Error rate &middot; 7d</span>
+          <span style="font-size:25px;font-weight:600;color:#ffffff">0.42%</span>
+          <span style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#0ca30c"><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M5 1.5v7M2 5.5l3 3 3-3" stroke="#0ca30c" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>0.08 pts vs prior 7d</span>
+        </div>
+        <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#898781">Queue p95 &middot; 7d</span>
+          <span style="font-size:25px;font-weight:600;color:#ffffff">340 ms</span>
+          <span style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:#ec835a"><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M5 8.5v-7M2 4.5 5 1.5l3 3" stroke="#ec835a" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>8.1% vs prior 7d</span>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3, minmax(0, 1fr));gap:14px;flex:1;min-height:0">
+        <div class="card" style="grid-column:span 2;padding:16px;display:flex;flex-direction:column;gap:10px;min-width:0">
+          <div style="display:flex;align-items:baseline;gap:10px">
+            <span style="font-size:13.5px;font-weight:600;color:#ffffff">Tokens by model</span>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:14px;font-size:11.5px;color:#c3c2b7">
+              <span style="display:flex;align-items:center;gap:6px"><span style="width:9px;height:9px;border-radius:2.5px;background:#3987e5;display:inline-block"></span>llama-70b</span>
+              <span style="display:flex;align-items:center;gap:6px"><span style="width:9px;height:9px;border-radius:2.5px;background:#d95926;display:inline-block"></span>qwen-7b</span>
+              <span style="display:flex;align-items:center;gap:6px"><span style="width:9px;height:9px;border-radius:2.5px;background:#199e70;display:inline-block"></span>bge-m3</span>
+            </div>
+          </div>
+          <svg viewBox="0 0 660 232" style="width:100%;height:100%;min-height:0" preserveAspectRatio="none">
+            <line x1="44" y1="16" x2="648" y2="16" stroke="#2c2c2a" stroke-width="1"/>
+            <line x1="44" y1="62" x2="648" y2="62" stroke="#2c2c2a" stroke-width="1"/>
+            <line x1="44" y1="108" x2="648" y2="108" stroke="#2c2c2a" stroke-width="1"/>
+            <line x1="44" y1="154" x2="648" y2="154" stroke="#2c2c2a" stroke-width="1"/>
+            <line x1="44" y1="200" x2="648" y2="200" stroke="#383835" stroke-width="1"/>
+            <text x="38" y="203" text-anchor="end" font-size="10" fill="#898781">0</text>
+            <text x="38" y="157" text-anchor="end" font-size="10" fill="#898781">3M</text>
+            <text x="38" y="111" text-anchor="end" font-size="10" fill="#898781">6M</text>
+            <text x="38" y="65" text-anchor="end" font-size="10" fill="#898781">9M</text>
+            <text x="38" y="19" text-anchor="end" font-size="10" fill="#898781">12M</text>
+            <text x="48" y="218" font-size="10" fill="#898781">Sep 1</text>
+            <text x="246" y="218" font-size="10" fill="#898781">Sep 3</text>
+            <text x="444" y="218" font-size="10" fill="#898781">Sep 5</text>
+            <text x="628" y="218" font-size="10" fill="#898781">Sep 7</text>
+            <polyline points="48,146 114,132 180,138 246,116 312,108 378,114 444,90 510,82 576,88 642,68" fill="none" stroke="#3987e5" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+            <polyline points="48,176 114,168 180,172 246,158 312,162 378,148 444,150 510,140 576,144 642,134" fill="none" stroke="#d95926" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+            <polyline points="48,191 114,187 180,189 246,183 312,185 378,179 444,181 510,175 576,177 642,171" fill="none" stroke="#199e70" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+            <line x1="444" y1="16" x2="444" y2="200" stroke="#52514e" stroke-width="1" stroke-dasharray="3 3"/>
+            <circle cx="444" cy="90" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+            <circle cx="444" cy="150" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+            <circle cx="444" cy="181" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+            <rect x="458" y="30" width="150" height="86" rx="6" fill="#222220" stroke="#3a3a38" stroke-width="1"/>
+            <text x="470" y="50" font-size="10.5" fill="#898781">Fri, Sep 5</text>
+            <rect x="470" y="60" width="8" height="8" rx="2" fill="#3987e5"/>
+            <text x="484" y="68" font-size="10.5" fill="#c3c2b7">llama-70b</text>
+            <text x="596" y="68" text-anchor="end" font-size="10.5" fill="#ffffff">7.2M</text>
+            <rect x="470" y="76" width="8" height="8" rx="2" fill="#d95926"/>
+            <text x="484" y="84" font-size="10.5" fill="#c3c2b7">qwen-7b</text>
+            <text x="596" y="84" text-anchor="end" font-size="10.5" fill="#ffffff">3.3M</text>
+            <rect x="470" y="92" width="8" height="8" rx="2" fill="#199e70"/>
+            <text x="484" y="100" font-size="10.5" fill="#c3c2b7">bge-m3</text>
+            <text x="596" y="100" text-anchor="end" font-size="10.5" fill="#ffffff">1.2M</text>
+          </svg>
+        </div>
+        <div class="card" style="padding:16px;display:flex;flex-direction:column;gap:12px;min-width:0">
+          <span style="font-size:13.5px;font-weight:600;color:#ffffff">Tokens by alias</span>
+          <svg viewBox="0 0 380 180" style="width:100%" preserveAspectRatio="xMinYMin meet">
+            <text x="0" y="22" font-size="11" fill="#c3c2b7" font-family="IBM Plex Mono, ui-monospace, monospace">fast</text>
+            <path d="M56 10 h250 a4 4 0 0 1 4 4 v10 a4 4 0 0 1 -4 4 H56 Z" fill="#3987e5"/>
+            <text x="318" y="23" font-size="11" fill="#c3c2b7">214.6M</text>
+            <text x="0" y="66" font-size="11" fill="#c3c2b7" font-family="IBM Plex Mono, ui-monospace, monospace">smart</text>
+            <path d="M56 54 h98 a4 4 0 0 1 4 4 v10 a4 4 0 0 1 -4 4 H56 Z" fill="#3987e5"/>
+            <text x="166" y="67" font-size="11" fill="#c3c2b7">86.9M</text>
+            <text x="0" y="110" font-size="11" fill="#c3c2b7" font-family="IBM Plex Mono, ui-monospace, monospace">embed</text>
+            <path d="M56 98 h34 a4 4 0 0 1 4 4 v10 a4 4 0 0 1 -4 4 H56 Z" fill="#3987e5"/>
+            <text x="102" y="111" font-size="11" fill="#c3c2b7">32.5M</text>
+            <text x="0" y="154" font-size="11" fill="#c3c2b7" font-family="IBM Plex Mono, ui-monospace, monospace">cheap</text>
+            <path d="M56 142 h13 a4 4 0 0 1 4 4 v10 a4 4 0 0 1 -4 4 H56 Z" fill="#3987e5"/>
+            <text x="80" y="155" font-size="11" fill="#c3c2b7">14.2M</text>
+            <line x1="56" y1="6" x2="56" y2="164" stroke="#383835" stroke-width="1"/>
+          </svg>
+          <div style="margin-top:auto;border-top:1px solid rgba(255,255,255,0.07);padding-top:10px;font-size:11px;color:#898781;line-height:1.5">Aliases are the public vocabulary &mdash; keys request an alias, the gateway resolves the model.</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2, minmax(0, 1fr));gap:14px;flex:1;min-height:0">
+        <div class="card" style="padding:16px;display:flex;flex-direction:column;gap:10px;min-width:0">
+          <div style="display:flex;align-items:baseline;gap:10px">
+            <span style="font-size:13.5px;font-weight:600;color:#ffffff">Queue latency</span>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:14px;font-size:11.5px;color:#c3c2b7">
+              <span style="display:flex;align-items:center;gap:6px"><span style="width:9px;height:9px;border-radius:2.5px;background:#3987e5;display:inline-block"></span>p95</span>
+              <span style="display:flex;align-items:center;gap:6px"><span style="width:9px;height:9px;border-radius:2.5px;background:#86b6ef;display:inline-block"></span>p50</span>
+            </div>
+          </div>
+          <svg viewBox="0 0 620 170" style="width:100%;height:100%;min-height:0" preserveAspectRatio="none">
+            <line x1="44" y1="12" x2="608" y2="12" stroke="#2c2c2a" stroke-width="1"/>
+            <line x1="44" y1="56" x2="608" y2="56" stroke="#2c2c2a" stroke-width="1"/>
+            <line x1="44" y1="100" x2="608" y2="100" stroke="#2c2c2a" stroke-width="1"/>
+            <line x1="44" y1="144" x2="608" y2="144" stroke="#383835" stroke-width="1"/>
+            <text x="38" y="147" text-anchor="end" font-size="10" fill="#898781">0</text>
+            <text x="38" y="103" text-anchor="end" font-size="10" fill="#898781">200</text>
+            <text x="38" y="59" text-anchor="end" font-size="10" fill="#898781">400</text>
+            <text x="38" y="15" text-anchor="end" font-size="10" fill="#898781">600 ms</text>
+            <polyline points="48,72 110,78 172,68 234,80 296,62 358,70 420,52 482,64 544,48 606,58" fill="none" stroke="#3987e5" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+            <polyline points="48,124 110,126 172,122 234,127 296,120 358,123 420,116 482,121 544,114 606,118" fill="none" stroke="#86b6ef" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="card" style="padding:6px 0 0 0;display:flex;flex-direction:column;min-width:0;overflow:hidden">
+          <div style="padding:10px 16px 8px 16px;font-size:13.5px;font-weight:600;color:#ffffff">Top API keys &middot; 7d</div>
+          <table>
+            <thead><tr><th>Key</th><th>Project</th><th style="text-align:right">Tokens</th><th style="text-align:right">Requests</th><th>Budget used</th></tr></thead>
+            <tbody>
+              <tr><td class="mono" style="color:#ffffff">ci-pipeline</td><td>production</td><td class="num" style="text-align:right">121.4M</td><td class="num" style="text-align:right">402k</td><td><span style="display:inline-flex;align-items:center;gap:8px"><span style="width:64px;height:5px;border-radius:3px;background:#2c2c2a;display:inline-block;overflow:hidden"><span style="display:block;width:61%;height:100%;background:#3987e5"></span></span><span class="num" style="font-size:11px">61%</span></span></td></tr>
+              <tr><td class="mono" style="color:#ffffff">chat-frontend</td><td>production</td><td class="num" style="text-align:right">96.2M</td><td class="num" style="text-align:right">513k</td><td><span style="display:inline-flex;align-items:center;gap:8px"><span style="width:64px;height:5px;border-radius:3px;background:#2c2c2a;display:inline-block;overflow:hidden"><span style="display:block;width:48%;height:100%;background:#3987e5"></span></span><span class="num" style="font-size:11px">48%</span></span></td></tr>
+              <tr><td class="mono" style="color:#ffffff">batch-embedder</td><td>production</td><td class="num" style="text-align:right">31.8M</td><td class="num" style="text-align:right">288k</td><td><span style="display:inline-flex;align-items:center;gap:8px"><span style="width:64px;height:5px;border-radius:3px;background:#2c2c2a;display:inline-block;overflow:hidden"><span style="display:block;width:33%;height:100%;background:#3987e5"></span></span><span class="num" style="font-size:11px">33%</span></span></td></tr>
+              <tr><td class="mono" style="color:#ffffff">research-sandbox</td><td>research</td><td class="num" style="text-align:right">8.1M</td><td class="num" style="text-align:right">21k</td><td><span style="display:inline-flex;align-items:center;gap:8px"><span style="width:64px;height:5px;border-radius:3px;background:#2c2c2a;display:inline-block;overflow:hidden"><span style="display:block;width:8%;height:100%;background:#3987e5"></span></span><span class="num" style="font-size:11px">8%</span></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
