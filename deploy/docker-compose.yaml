@@ -30,3 +30,18 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+  gateway:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["gateway", "-config", "/etc/infbus/gateway.yaml"]
+    environment: { INFBUS_NATS_URL: nats://nats:4222 }
+    volumes: ["./gateway.example.yaml:/etc/infbus/gateway.yaml:ro"]
+    ports: ["8080:8080"]
+    depends_on:
+      nats: { condition: service_healthy }
+  worker:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["worker", "-config", "/etc/infbus/worker.yaml"]
+    environment: { INFBUS_NATS_URL: nats://nats:4222 }
+    volumes: ["./worker.example.yaml:/etc/infbus/worker.yaml:ro"]
+    depends_on:
+      nats: { condition: service_healthy }

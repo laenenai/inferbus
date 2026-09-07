@@ -20,7 +20,11 @@ func run(args []string, stdout io.Writer) int {
 	case "version":
 		fmt.Fprintf(stdout, "infbus %s\n", version)
 		return 0
-	case "gateway", "worker", "harvester":
+	case "gateway":
+		return runGateway(args[1:], stdout)
+	case "worker":
+		return runWorker(args[1:], stdout)
+	case "harvester":
 		return notImplemented(args[0], stdout)
 	default:
 		fmt.Fprintf(stdout, "unknown subcommand %q\n", args[0])

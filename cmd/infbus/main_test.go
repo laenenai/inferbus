@@ -35,3 +35,20 @@ func TestRunNoArgsShowsUsage(t *testing.T) {
 		}
 	}
 }
+
+func TestGatewayRequiresConfig(t *testing.T) {
+	var out bytes.Buffer
+	if code := run([]string{"gateway"}, &out); code == 0 {
+		t.Fatal("gateway without -config should fail")
+	}
+	if !strings.Contains(out.String(), "-config") {
+		t.Fatalf("output %q should mention -config", out.String())
+	}
+}
+
+func TestWorkerRequiresConfig(t *testing.T) {
+	var out bytes.Buffer
+	if code := run([]string{"worker"}, &out); code == 0 {
+		t.Fatal("worker without -config should fail")
+	}
+}
