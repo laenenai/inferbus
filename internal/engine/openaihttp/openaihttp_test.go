@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -261,7 +262,12 @@ func TestEmbedPostsToEmbeddingsPath(t *testing.T) {
 // mutate the request body it hands upstream (unlike Chat, which rewrites
 // "model" — embeddings requests carry no client-facing alias to rewrite).
 func TestEmbedPassesBodyVerbatim(t *testing.T) {
-	want := `{"model":"m","input":"hi","dimensions":256}`
+	// "Verbatim" means every field the client (and the alias params) put in
+	// the body survives — including ones this code has never heard of. The
+	// single exception is "model", which Embed rewrites to the worker's
+	// concrete name exactly as Chat does (see
+	// TestEmbedRewritesModelToConcreteName for why that is not optional).
+	sent := `{"model":"embed-fast","input":"hi","dimensions":256,"encoding_format":"float","x_future_field":{"a":[1,2]}}`
 	var got []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, _ = io.ReadAll(r.Body)
@@ -269,12 +275,30 @@ func TestEmbedPassesBodyVerbatim(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	e := New(srv.URL, srv.Client())
-	_, _, err := e.Embed(context.Background(), "m", json.RawMessage(want))
+	_, _, err := e.Embed(context.Background(), "concrete-m", json.RawMessage(sent))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != want {
-		t.Fatalf("body sent upstream = %s, want %s", got, want)
+	var in, out map[string]any
+	if err := json.Unmarshal([]byte(sent), &in); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatalf("upstream body not JSON: %s", got)
+	}
+	if out["model"] != "concrete-m" {
+		t.Errorf("model = %v, want the concrete name", out["model"])
+	}
+	for k, v := range in {
+		if k == "model" {
+			continue
+		}
+		if !reflect.DeepEqual(out[k], v) {
+			t.Errorf("field %q = %#v upstream, want %#v", k, out[k], v)
+		}
+	}
+	if len(out) != len(in) {
+		t.Errorf("upstream body has %d fields, want %d: %s", len(out), len(in), got)
 	}
 }
 
@@ -339,5 +363,35 @@ func TestChatStreamRewritesModelToConcreteName(t *testing.T) {
 	}
 	if *lastModel != "llama3.2" {
 		t.Fatalf("upstream received model %q, want %q", *lastModel, "llama3.2")
+	}
+}
+
+// TestEmbedRewritesModelToConcreteName is a regression guard for a bug that
+// only a real engine could surface: the gateway resolves an alias to a NATS
+// subject but leaves the client's alias in the request body, so Embed must
+// substitute this worker's concrete model name exactly as Chat does. Shipping
+// without it made every /v1/embeddings call fail against a real vLLM with
+// "The model `<alias>` does not exist" (404 → 502), while every fake-engine
+// test stayed green because fakes ignore the model field.
+func TestEmbedRewritesModelToConcreteName(t *testing.T) {
+	var gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotModel, _ = body["model"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"embedding":[0.1],"index":0}],"usage":{"prompt_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	e := New(srv.URL, nil)
+	// The body still names the client-facing alias, as it does in production.
+	_, _, err := e.Embed(context.Background(), "concrete-model-v2",
+		json.RawMessage(`{"model":"embed-fast","input":"hi","dimensions":256}`))
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if gotModel != "concrete-model-v2" {
+		t.Fatalf("engine received model %q, want the concrete name %q", gotModel, "concrete-model-v2")
 	}
 }

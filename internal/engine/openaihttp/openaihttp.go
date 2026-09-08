@@ -78,13 +78,21 @@ func (e *Engine) Chat(ctx context.Context, model string, body json.RawMessage) (
 	return b, usageOf(b), nil
 }
 
-// Embed posts an OpenAI-shaped embeddings request body verbatim (unlike
-// Chat/ChatStream, an embeddings request carries no client-facing model
-// alias to rewrite) to /v1/embeddings and returns the response body
-// alongside its prompt-token usage; embeddings have no completion tokens,
+// Embed posts an OpenAI-shaped embeddings request to /v1/embeddings and
+// returns the response body alongside its prompt-token usage. Like
+// Chat/ChatStream it rewrites the body's "model" to this worker's concrete
+// name first: the gateway resolves an alias to a SUBJECT but deliberately
+// leaves the client's alias in the body, so an un-rewritten embeddings
+// request reaches the engine naming an alias it has never heard of and is
+// rejected with a 404 (caught against a real vLLM; fake engines ignore the
+// model field and cannot surface this). Embeddings have no completion tokens,
 // so wire.Usage.CompletionTokens is always 0.
 func (e *Engine) Embed(ctx context.Context, model string, body json.RawMessage) (json.RawMessage, wire.Usage, error) {
-	resp, err := e.post(ctx, "/v1/embeddings", body)
+	rewritten, err := rewriteModel(body, model)
+	if err != nil {
+		return nil, wire.Usage{}, err
+	}
+	resp, err := e.post(ctx, "/v1/embeddings", rewritten)
 	if err != nil {
 		return nil, wire.Usage{}, err
 	}
