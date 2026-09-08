@@ -104,6 +104,11 @@ func (w *Worker) RunReady(ctx context.Context, ready chan<- struct{}) error {
 		}
 		consumers = append(consumers, cc)
 	}
+	// Fire-and-forget: RunReady does not join this goroutine on shutdown.
+	// advertise() only reads immutable Config fields (never a data race)
+	// and exits promptly once ctx.Done() fires, so not waiting for it
+	// here is harmless — worst case is one more best-effort Put that
+	// fails fast on the already-canceled ctx.
 	go w.advertise(ctx)
 	if ready != nil {
 		close(ready)

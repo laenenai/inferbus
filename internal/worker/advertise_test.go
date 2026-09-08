@@ -113,18 +113,20 @@ func TestAdvertisePublishesAndHeartbeats(t *testing.T) {
 	}
 }
 
-// TestAdvertiseBestEffort proves that a broken MODELS bucket never takes
-// the worker down. The advertiser's CreateOrUpdateKeyValue call is made
-// to fail deterministically (rather than racing a live nc.Close against
-// the advertise goroutine's own scheduling — "close the nc" can't
-// distinguish "advertise never got a chance to run" from "advertise
-// failed and recovered") by pre-creating the underlying "KV_MODELS"
-// stream with an incompatible storage type: the server then rejects the
-// advertiser's update ("stream configuration update can not change
-// storage type") every single tick, exactly like a permissions failure
-// would. RunReady's own EnsureStreams/consumer setup uses a completely
-// different stream (INFERENCE) and must still succeed and stay up.
-func TestAdvertiseBestEffort(t *testing.T) {
+// TestAdvertiseBestEffortServing is an integration-level smoke check: a
+// worker started with a pre-broken MODELS bucket (see
+// advertise_internal_test.go's TestAdvertiseBestEffort for the
+// deterministic, race-free proof that advertise()'s KV-provisioning
+// failure path is actually taken) must still become ready via RunReady
+// and must still serve real requests end to end. This test does NOT by
+// itself prove which branch inside advertise() ran on any given
+// execution — under `-race` the advertiser's single
+// CreateOrUpdateKeyValue attempt can lose its race against this test's
+// own ctx cancellation (via t.Cleanup) and observe ctx.Err() instead of
+// the server's real rejection — it only proves the weaker but still
+// useful property that RunReady's readiness and serving path are
+// unaffected by advertise() regardless of why it failed.
+func TestAdvertiseBestEffortServing(t *testing.T) {
 	nc, js := testutil.RunNATS(t)
 	ctx0 := context.Background()
 	if _, err := js.CreateStream(ctx0, jetstream.StreamConfig{
@@ -162,8 +164,7 @@ func TestAdvertiseBestEffort(t *testing.T) {
 
 	// And the worker must genuinely still be serving: a real streamed
 	// request through the (unrelated) INFERENCE stream completes
-	// normally despite advertise() failing on every tick in the
-	// background.
+	// normally despite advertise() having failed in the background.
 	l := publishAndListen(t, nc, js, "req-best-effort", time.Now().Add(time.Minute))
 	msgs, err := drain(t, l)
 	if err != nil {
