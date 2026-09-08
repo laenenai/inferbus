@@ -12,7 +12,7 @@ that nothing has ever applied. Ships as **v0.2.0**.
  client ──POST /v1/embeddings──▶ gateway
                                   │ auth → allowlist → budget → admission
                                   │ resolve alias → {target, params}
-                                  │ rewrite body.model, merge params
+                                  │ merge alias params into the body
                                   ▼
                     JetStream INFERENCE  (Ib-Kind: embed)
                                   │
@@ -78,16 +78,22 @@ type Resolution struct {
 }
 ```
 
-- **Merge rule:** after `model` is rewritten to `Resolution.Target`, each
-  `Params` entry is set on the request body, **overriding** any client
-  value. The operator owns the alias contract; a client cannot escape it.
+- **Merge rule:** each `Params` entry is set on the request body,
+  **overriding** any client value, immediately before the request is
+  published. (The gateway never rewrites the body's `model` field — it
+  selects the subject from `Resolution.Target` and the worker's engine
+  substitutes its own concrete model name; alias params are therefore the
+  only body mutation the gateway makes.) The operator owns the alias
+  contract; a client cannot escape it.
   Applied identically to chat and embeddings — `params` was always a
   general alias feature (temperature/top_p for chat, `dimensions`/
   `encoding_format` for embeddings).
 - **Typing:** KV values are strings. Each value is parsed as JSON; if it
   parses to a JSON scalar/array/object it is inserted as that type
   (`"512"` → `512`, `"true"` → `true`, `"[1,2]"` → `[1,2]`), otherwise as
-  a JSON string (`float` → `"float"`). One rule, no per-key schema.
+  a JSON string (`float` → `"float"`). One rule, no per-key schema — with
+  the documented consequence that a param whose value must be the literal
+  *string* `"512"` is inexpressible; no OpenAI-shaped parameter needs that.
 - **Reserved:** `model` and `stream` are refused as param keys — at the
   admin API (400) and defensively at merge time (skipped + warned) — since
   they would break alias resolution and the response protocol.
