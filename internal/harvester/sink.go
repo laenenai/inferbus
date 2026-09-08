@@ -1,7 +1,11 @@
-// Package harvester holds the Sink contract for persisting usage rows to a
-// backing store (the budget-ledger database). It defines the Row type (mapped
-// from wire.UsageEvent), the Sink interface (InsertBatch, MonthToDate, Close),
-// and the FakeSink in-memory implementation for testing.
+// Package harvester implements the M4 usage pipeline's harvester process:
+// a durable JetStream pull consumer (harvester.go) that decodes METERING
+// events, batches them, and flushes each batch through the Sink contract
+// (this file) to a backing store (the budget-ledger database). This file
+// defines the Row type (mapped from wire.UsageEvent), the Sink interface
+// (InsertBatch, MonthToDate, Close), and the FakeSink in-memory
+// implementation used by tests; chsink.go provides the production
+// ClickHouse-backed implementation.
 package harvester
 
 import (
@@ -69,6 +73,11 @@ func RowFromEvent(ev wire.UsageEvent) Row {
 }
 
 // Sink defines the contract for persisting usage rows to a backing store.
+// Implementations must be safe for concurrent use: the harvester calls
+// InsertBatch from at most one flush goroutine at a time, but a caller
+// outside the harvester (e.g. the Task 5 budget ledger reading
+// MonthToDate) may call other methods concurrently with an in-progress
+// InsertBatch or with each other.
 type Sink interface {
 	// InsertBatch inserts a batch of rows into the sink.
 	InsertBatch(ctx context.Context, rows []Row) error
@@ -86,9 +95,17 @@ type Sink interface {
 // rows by ReqID (first one wins) and tracks an optional FailNext error to
 // inject failures on demand for retry testing. FakeSink is thread-safe.
 type FakeSink struct {
-	mu       sync.Mutex
-	rows     []Row
+	mu   sync.Mutex
+	rows []Row
+
 	FailNext error
+
+	// Delay, if set, makes InsertBatch sleep this long before committing
+	// rows — with the lock released during the sleep, so RowsSnapshot and
+	// concurrent InsertBatch callers are never blocked by it. Used to
+	// simulate a slow sink in tests exercising the harvester's in-flight
+	// heartbeat path.
+	Delay time.Duration
 }
 
 // NewFakeSink creates a new FakeSink.
@@ -100,16 +117,26 @@ func NewFakeSink() *FakeSink {
 
 // InsertBatch inserts rows into the FakeSink, deduplicating by ReqID. If
 // FailNext is set, it returns that error once and clears it; otherwise, the
-// first occurrence of each ReqID is kept.
+// first occurrence of each ReqID is kept. If Delay is set, InsertBatch
+// sleeps that long — with the lock released — before committing rows, to
+// simulate a slow sink.
 func (fs *FakeSink) InsertBatch(ctx context.Context, rows []Row) error {
 	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
 	if fs.FailNext != nil {
 		err := fs.FailNext
 		fs.FailNext = nil
+		fs.mu.Unlock()
 		return err
 	}
+	delay := fs.Delay
+	fs.mu.Unlock()
+
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 
 	// Deduplicate by ReqID: build a map of ReqIDs already seen.
 	seen := make(map[string]bool)
