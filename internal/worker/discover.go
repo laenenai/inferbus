@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/laenenai/inferbus/internal/wire"
 )
@@ -35,6 +36,13 @@ type modelsResponse struct {
 // wait; callers should give it a bounded deadline (zero-config startup
 // should not hang indefinitely on a misbehaving engine).
 func Discover(ctx context.Context, engineURL string, maxInflight int) (Config, error) {
+	// Normalize like openaihttp.New does: a trailing slash on the
+	// operator-supplied URL must not turn into "//v1/models" — vLLM and
+	// other FastAPI/Starlette-based engines 404 on the double slash. Every
+	// ModelConfig.URL below reuses this same normalized value, so later
+	// per-request calls made through openaihttp.New(mc.URL, nil) build the
+	// exact same request path as this discovery call did.
+	engineURL = strings.TrimRight(engineURL, "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, engineURL+"/v1/models", nil)
 	if err != nil {
 		return Config{}, fmt.Errorf("discover %s: %w", engineURL, err)

@@ -49,6 +49,33 @@ func TestDiscover(t *testing.T) {
 	}
 }
 
+// TestDiscoverTrimsTrailingSlash: an engine URL with a trailing slash
+// (e.g. "-engine http://host:8000/") must not produce a "//v1/models"
+// request path — vLLM/FastAPI/Starlette servers 404 on the double slash.
+// It also checks that the ModelConfig.URL stored for the worker's engine
+// client is the same normalized (no trailing slash) value, so later
+// per-request calls are consistent with the discovery call.
+func TestDiscoverTrimsTrailingSlash(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("request path = %q, want /v1/models (no double slash)", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"llama3-2"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg, err := worker.Discover(context.Background(), srv.URL+"/", 4)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(cfg.Models) != 1 {
+		t.Fatalf("Models = %+v, want exactly 1", cfg.Models)
+	}
+	if cfg.Models[0].URL != srv.URL {
+		t.Errorf("Models[0].URL = %q, want %q (trailing slash trimmed)", cfg.Models[0].URL, srv.URL)
+	}
+}
+
 // TestDiscoverSkipsInvalidSlugs: a discovered model id that isn't already
 // NATS-subject-safe (wire.Slug would alter it) must be skipped rather than
 // fail the whole discovery — the remaining valid model should still come
