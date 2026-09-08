@@ -213,14 +213,14 @@ curl -X POST http://localhost:8081/admin/v1/orgs/acme/projects \
   -d '{"id":"default","name":"Default"}'
 ```
 
-4. Set an alias. The target must be NATS-subject-safe (lowercase
-`[a-z0-9-]`), which is the same token a worker's model name resolves to —
-so a worker serving `llama3.2` is reached by the target `llama3-2`:
+4. Set an alias. The target is the model name exactly as the worker
+serves it (the engine's own id — e.g. Ollama's `llama3.2:latest`); both
+sides derive the same NATS subject from it, so no manual slugging:
 ```sh
 curl -X PUT http://localhost:8081/admin/v1/aliases/acme/fast \
   -H "Authorization: Bearer dev_admin_change_me" \
   -H "Content-Type: application/json" \
-  -d '{"target":"llama3-2"}'
+  -d '{"target":"llama3.2:latest"}'
 ```
 
 5. Create an API key:

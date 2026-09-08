@@ -109,11 +109,10 @@ func (r *statusRecorder) Flush() {
 }
 
 // Unwrap exposes the wrapped ResponseWriter to the net/http machinery that
-// reaches the real writer by unwrapping rather than by type assertion:
-// http.NewResponseController, and http.MaxBytesReader's probe for the
-// unexported requestTooLarge() interface that tells the server to close the
-// connection after an oversized body (gateway.go's 1 MiB body limit).
-// Without it those probes stop at this wrapper and silently no-op.
+// reaches the real writer by unwrapping — http.NewResponseController and
+// friends. (MaxBytesReader's requestTooLarge probe is NOT rescued by this:
+// net/http uses a plain type assertion there, so that close-connection
+// hint is lost through any wrapper; the 413 response itself is unaffected.)
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 // withRequestMetrics wraps h so every response increments
@@ -126,10 +125,11 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter 
 func (g *Gateway) withRequestMetrics(route string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		// Deferred so a panicking handler is still counted: net/http's
-		// per-connection recover turns it into a 500 the client sees, and a
-		// counter documented as "exactly once per response" must not have a
-		// hole exactly where things went most wrong.
+		// Deferred so a panicking handler is still counted. Caveat:
+		// net/http's per-connection recover logs and closes the connection
+		// without writing a status, so a panic before any WriteHeader is
+		// counted under the recorder's default code="200" — an accepted
+		// blind spot, better than not counting the request at all.
 		defer func() {
 			g.metrics.requests.WithLabelValues(route, strconv.Itoa(rec.status)).Inc()
 		}()
