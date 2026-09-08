@@ -1,0 +1,72 @@
+{
+  "title": "inferbus usage",
+  "uid": "inferbus-usage",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "utc",
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "1m",
+  "tags": ["inferbus", "usage"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_CLICKHOUSE",
+        "type": "datasource",
+        "query": "grafana-clickhouse-datasource",
+        "label": "ClickHouse",
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Tokens/hour by model",
+      "type": "timeseries",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${DS_CLICKHOUSE}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${DS_CLICKHOUSE}" },
+          "rawSql": "SELECT toStartOfHour(ts) AS time, model, sum(prompt_tokens + completion_tokens) AS tokens FROM usage_events WHERE $__timeFilter(ts) GROUP BY time, model ORDER BY time",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Requests/hour by alias",
+      "type": "timeseries",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${DS_CLICKHOUSE}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${DS_CLICKHOUSE}" },
+          "rawSql": "SELECT toStartOfHour(ts) AS time, alias, count() AS requests FROM usage_events WHERE $__timeFilter(ts) GROUP BY time, alias ORDER BY time",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Error rate %",
+      "type": "timeseries",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${DS_CLICKHOUSE}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${DS_CLICKHOUSE}" },
+          "rawSql": "SELECT toStartOfHour(ts) AS time, 100.0 * sumIf(1, status = 'error') / count() AS error_pct FROM usage_events WHERE $__timeFilter(ts) GROUP BY time ORDER BY time",
+          "format": 1
+        }
+      ]
+    }
+  ]
+}
