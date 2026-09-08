@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/laenenai/inferbus/internal/testutil"
 )
@@ -126,7 +127,11 @@ func TestStatusRecorderUnwrap(t *testing.T) {
 	nc, js := testutil.RunNATS(t)
 	g := New(nc, js, Config{})
 
-	var flushErr error
+	// A channel, not a shared variable: the handler runs on the server's
+	// connection goroutine, and the client receiving the response does not
+	// happen-after the handler's final writes — reading a plain variable
+	// here is a data race (caught by CI's -race scheduler).
+	flushErr := make(chan error, 1)
 	h := g.withRequestMetrics("chat", func(w http.ResponseWriter, r *http.Request) {
 		if rec, ok := w.(*statusRecorder); !ok {
 			t.Errorf("handler saw %T, want *statusRecorder", w)
@@ -134,7 +139,7 @@ func TestStatusRecorderUnwrap(t *testing.T) {
 			t.Errorf("Unwrap() did not return the wrapped ResponseWriter")
 		}
 		w.WriteHeader(http.StatusOK)
-		flushErr = http.NewResponseController(w).Flush()
+		flushErr <- http.NewResponseController(w).Flush()
 	})
 
 	srv := httptest.NewServer(h)
@@ -144,8 +149,13 @@ func TestStatusRecorderUnwrap(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	defer resp.Body.Close()
-	if flushErr != nil {
-		t.Fatalf("ResponseController.Flush through statusRecorder: %v, want nil", flushErr)
+	select {
+	case err := <-flushErr:
+		if err != nil {
+			t.Fatalf("ResponseController.Flush through statusRecorder: %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never reported its Flush result")
 	}
 }
 
