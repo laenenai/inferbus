@@ -14,6 +14,15 @@ type FakeEngine struct {
 	FinalUsage wire.Usage
 	Err        error         // if set, returned after emitting half the chunks
 	Delay      time.Duration // between chunks
+
+	// EmbedResponse is the raw body Embed returns; defaults to a minimal
+	// OpenAI-shaped embeddings response if unset. EmbedUsage is the usage
+	// Embed returns alongside it. EmbedErr, if set, is returned instead
+	// (kept separate from Err/Chunks/Delay so Chat/ChatStream and Embed
+	// can be configured independently on the same fake).
+	EmbedResponse json.RawMessage
+	EmbedUsage    wire.Usage
+	EmbedErr      error
 }
 
 func (f *FakeEngine) Chat(ctx context.Context, model string, body json.RawMessage) (json.RawMessage, wire.Usage, error) {
@@ -72,4 +81,15 @@ func (f *FakeEngine) ChatStream(ctx context.Context, model string, body json.Raw
 		}
 	}
 	return f.FinalUsage, nil
+}
+
+func (f *FakeEngine) Embed(ctx context.Context, model string, body json.RawMessage) (json.RawMessage, wire.Usage, error) {
+	if f.EmbedErr != nil {
+		return nil, wire.Usage{}, f.EmbedErr
+	}
+	resp := f.EmbedResponse
+	if resp == nil {
+		resp = json.RawMessage(`{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0}]}`)
+	}
+	return resp, f.EmbedUsage, nil
 }

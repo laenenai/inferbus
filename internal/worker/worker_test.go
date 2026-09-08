@@ -513,6 +513,10 @@ func (panicEngine) ChatStream(ctx context.Context, model string, body json.RawMe
 	panic("boom: chat stream")
 }
 
+func (panicEngine) Embed(ctx context.Context, model string, body json.RawMessage) (json.RawMessage, wire.Usage, error) {
+	panic("boom: embed")
+}
+
 func TestHandlePanicRecovered(t *testing.T) {
 	// One worker process serving two models: "m1" always panics, "m2" is a
 	// normal FakeEngine. This lets the test prove the panic doesn't take

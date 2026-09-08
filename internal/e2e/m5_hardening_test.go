@@ -116,6 +116,11 @@ func (e *wedgeEngine) ChatStream(context.Context, string, json.RawMessage, func(
 	return wire.Usage{}, nil
 }
 
+func (e *wedgeEngine) Embed(context.Context, string, json.RawMessage) (json.RawMessage, wire.Usage, error) {
+	<-e.release
+	return json.RawMessage(`{"object":"list","data":[]}`), wire.Usage{}, nil
+}
+
 // TestM5Redelivery: a "rogue" worker picks up the only delivery of a
 // request and never acks it (its FakeEngine is wedged — it blocks until
 // this test's cleanup cancels its context, well after this test's own

@@ -92,3 +92,45 @@ func TestFakeEngineHappyPath(t *testing.T) {
 		t.Errorf("expected FinalUsage %v, got %v", fe.FinalUsage, usage)
 	}
 }
+
+func TestFakeEngineEmbedDefaultResponse(t *testing.T) {
+	fe := &FakeEngine{EmbedUsage: wire.Usage{PromptTokens: 3}}
+	body, usage, err := fe.Embed(context.Background(), "test-model", nil)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if usage != (wire.Usage{PromptTokens: 3}) {
+		t.Errorf("expected EmbedUsage %v, got %v", fe.EmbedUsage, usage)
+	}
+	var parsed struct {
+		Object string `json:"object"`
+	}
+	if json.Unmarshal(body, &parsed) != nil || parsed.Object != "list" {
+		t.Errorf("expected default OpenAI-shaped embeddings body, got %s", body)
+	}
+}
+
+func TestFakeEngineEmbedCustomResponseAndErr(t *testing.T) {
+	custom := json.RawMessage(`{"object":"list","data":[{"embedding":[9.9],"index":0}]}`)
+	fe := &FakeEngine{EmbedResponse: custom, EmbedUsage: wire.Usage{PromptTokens: 42}}
+	body, usage, err := fe.Embed(context.Background(), "test-model", nil)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if string(body) != string(custom) {
+		t.Errorf("expected custom EmbedResponse %s, got %s", custom, body)
+	}
+	if usage != (wire.Usage{PromptTokens: 42}) {
+		t.Errorf("expected EmbedUsage %v, got %v", fe.EmbedUsage, usage)
+	}
+
+	testErr := errors.New("embed boom")
+	fe2 := &FakeEngine{EmbedErr: testErr}
+	_, usage2, err2 := fe2.Embed(context.Background(), "test-model", nil)
+	if err2 != testErr {
+		t.Errorf("expected error %v, got %v", testErr, err2)
+	}
+	if usage2 != (wire.Usage{}) {
+		t.Errorf("expected zero usage on EmbedErr, got %v", usage2)
+	}
+}
