@@ -33,6 +33,10 @@ type Gateway struct {
 	// default. A nil *admissionChecker admits every request (allow is
 	// nil-safe), so the disabled path costs a single nil comparison.
 	admission *admissionChecker
+	// metrics holds this Gateway's own private Prometheus registry (Task 6
+	// / ADR-0028 metrics floor) — see metrics.go's package doc comment for
+	// why per-instance, never global.
+	metrics *gwMetrics
 }
 
 // New builds a Gateway in the default STATIC IAM mode: key auth and alias
@@ -55,7 +59,7 @@ func newGateway(nc *nats.Conn, js jetstream.JetStream, cfg Config, iam iamProvid
 	if cfg.RequestTimeout == 0 {
 		cfg.RequestTimeout = 5 * time.Minute
 	}
-	g := &Gateway{nc: nc, js: js, cfg: cfg, iam: iam}
+	g := &Gateway{nc: nc, js: js, cfg: cfg, iam: iam, metrics: newGWMetrics()}
 	// max_backlog is the on/off switch: overrides alone don't enable the
 	// feature, they only reshape it once a default limit exists.
 	if cfg.Admission.MaxBacklog > 0 {
@@ -68,10 +72,11 @@ func newGateway(nc *nats.Conn, js jetstream.JetStream, cfg Config, iam iamProvid
 
 func (g *Gateway) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", g.chatCompletions)
-	mux.HandleFunc("GET /v1/models", g.models)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("GET /readyz", g.readyz)
+	mux.HandleFunc("POST /v1/chat/completions", g.withRequestMetrics(routeLabel("/v1/chat/completions"), g.withInflight(g.chatCompletions)))
+	mux.HandleFunc("GET /v1/models", g.withRequestMetrics(routeLabel("/v1/models"), g.models))
+	mux.HandleFunc("GET /healthz", g.withRequestMetrics(routeLabel("/healthz"), func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	mux.HandleFunc("GET /readyz", g.withRequestMetrics(routeLabel("/readyz"), g.readyz))
+	mux.Handle("GET /metrics", g.metrics.Handler())
 	return mux
 }
 
@@ -258,6 +263,7 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// point at. Retry-After must be set before oaiError, which writes the
 	// status immediately.
 	if !g.admission.allow(r.Context(), target) {
+		g.metrics.admissionRejected.WithLabelValues(target).Inc()
 		w.Header().Set("Retry-After", strconv.Itoa(g.admission.retryAfter()))
 		oaiError(w, http.StatusTooManyRequests, "overloaded", "model queue is full, retry later")
 		return

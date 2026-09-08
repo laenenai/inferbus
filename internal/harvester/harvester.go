@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -111,17 +112,44 @@ type Harvester struct {
 
 	onRowMu sync.Mutex
 	onRow   func(Row)
+
+	// metrics is this Harvester's own private Prometheus registry (Task 6
+	// / ADR-0028 metrics floor) — see metrics.go's package doc comment for
+	// why per-instance, never global.
+	metrics *hvMetrics
 }
 
 // New constructs a Harvester. cfg is completed with defaults for any
 // unset field (see Config.withDefaults).
 func New(nc *nats.Conn, js jetstream.JetStream, sink Sink, cfg Config) *Harvester {
 	return &Harvester{
-		nc:   nc,
-		js:   js,
-		sink: sink,
-		cfg:  cfg.withDefaults(),
+		nc:      nc,
+		js:      js,
+		sink:    sink,
+		cfg:     cfg.withDefaults(),
+		metrics: newHVMetrics(),
 	}
+}
+
+// Handler serves this Harvester's Prometheus metrics
+// (inferbus_usage_rows_inserted_total, inferbus_insert_failures_total, and
+// inferbus_budget_entries once a BudgetLedger is wired via
+// SetBudgetEntries/SetBudgetGaugeFunc) in the Prometheus text exposition
+// format. The role's probe HTTP server (cmd/inferbus/roles.go) mounts this
+// at /metrics.
+func (h *Harvester) Handler() http.Handler {
+	return h.metrics.Handler()
+}
+
+// SetBudgetEntries sets (never increments/decrements) this Harvester's
+// inferbus_budget_entries{state="ok"|"exceeded"} gauge from a
+// BudgetLedger's own authoritative current counts. Wire it via
+// ledger.SetBudgetGaugeFunc(h.SetBudgetEntries) — metrics live on the
+// Harvester instance, and the ledger is a separate object with no metrics
+// of its own, so this is the seam that lets the two share one gauge
+// without either depending on the other's concrete type.
+func (h *Harvester) SetBudgetEntries(ok, exceeded int) {
+	h.metrics.setBudgetEntries(ok, exceeded)
 }
 
 // OnRow registers fn to be called once per successfully-inserted row,
@@ -341,6 +369,7 @@ func (h *Harvester) doFlush(ctx context.Context, batch []heldMsg) {
 
 	if err := h.sink.InsertBatch(ctx, rows); err != nil {
 		slog.Warn("harvester: insert batch failed, nak'ing for redelivery", "err", err, "held", len(batch))
+		h.metrics.insertFailures.Add(float64(len(batch)))
 		for _, item := range batch {
 			if nakErr := item.msg.NakWithDelay(nakRedeliverDelay); nakErr != nil {
 				slog.Warn("harvester: nak failed", "req_id", item.row.ReqID, "err", nakErr)
@@ -348,6 +377,7 @@ func (h *Harvester) doFlush(ctx context.Context, batch []heldMsg) {
 		}
 		return
 	}
+	h.metrics.rowsInserted.Add(float64(len(rows)))
 
 	h.onRowMu.Lock()
 	onRow := h.onRow

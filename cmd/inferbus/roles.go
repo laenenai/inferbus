@@ -320,10 +320,15 @@ func runHarvester(args []string, stdout io.Writer) int {
 	h := harvester.New(nc, js, sink, cfg)
 	ledger := harvester.NewBudgetLedger(js, sink, cfg.BudgetRefreshInterval)
 
-	// Wire the harvester's OnRow to the ledger's AddUsage.
+	// Wire the harvester's OnRow to the ledger's AddUsage, and the ledger's
+	// budget_entries flush path back to the harvester's own gauge — metrics
+	// live on the Harvester instance (Task 6 / ADR-0028), and this is the
+	// seam that lets the ledger report into it without either depending on
+	// the other's concrete type.
 	h.OnRow(ledger.AddUsage)
+	ledger.SetBudgetGaugeFunc(h.SetBudgetEntries)
 
-	return serveHarvester(ctx, cfg.Addr, stdout,
+	return serveHarvester(ctx, cfg.Addr, stdout, h.Handler(),
 		harvesterComponent{name: "harvester", run: h.Run},
 		harvesterComponent{name: "budget-ledger", run: ledger.Run},
 	)
@@ -350,7 +355,11 @@ type harvesterComponent struct {
 // deferred sink/NATS cleanup and never exiting non-zero for a supervisor
 // to restart. cancelRun is called on EVERY exit path, before wg.Wait(), so
 // the surviving components are always told to stop.
-func serveHarvester(ctx context.Context, addr string, stdout io.Writer, comps ...harvesterComponent) int {
+// metricsHandler serves the harvester role's Prometheus metrics (Task 6 /
+// ADR-0028); nil is a safe no-op — /metrics answers 404, same as any other
+// unrecognized path — which lets tests that don't care about metrics (e.g.
+// the shutdown/fail-fast supervisor tests) omit it.
+func serveHarvester(ctx context.Context, addr string, stdout io.Writer, metricsHandler http.Handler, comps ...harvesterComponent) int {
 	// runCtx is a child of ctx that can be canceled independently when
 	// either component fails fatally, allowing graceful HTTP shutdown.
 	runCtx, cancelRun := context.WithCancel(ctx)
@@ -405,6 +414,8 @@ func serveHarvester(ctx context.Context, addr string, stdout io.Writer, comps ..
 				}
 				w.WriteHeader(http.StatusOK)
 				fmt.Fprint(w, "OK")
+			} else if r.URL.Path == "/metrics" && metricsHandler != nil {
+				metricsHandler.ServeHTTP(w, r)
 			} else {
 				w.WriteHeader(http.StatusNotFound)
 			}

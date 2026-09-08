@@ -129,7 +129,7 @@ func TestHarvesterRequiresConfig(t *testing.T) {
 // returns instead of hanging forever.
 func serveHarvesterResult(ctx context.Context, out *bytes.Buffer, comps ...harvesterComponent) <-chan int {
 	res := make(chan int, 1)
-	go func() { res <- serveHarvester(ctx, "127.0.0.1:0", out, comps...) }()
+	go func() { res <- serveHarvester(ctx, "127.0.0.1:0", out, nil, comps...) }()
 	return res
 }
 
