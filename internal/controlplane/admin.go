@@ -81,6 +81,11 @@ type Admin struct {
 	// zero value is safe for callers (e.g. simple unit tests) that don't
 	// care about this. See isHealthy/authorizeOrgRole.
 	healthy func() bool
+	// usage answers GET /admin/v1/usage (Task 8's ClickHouse-backed usage
+	// reporting). nil means "not configured" — deployments with no
+	// clickhouse_dsn set (runner.go) never wire one, and getUsage
+	// (usage.go) reports 501 not_configured rather than panicking.
+	usage UsageReader
 }
 
 // NewAdmin wires an Admin. resync is called by POST
@@ -93,8 +98,11 @@ type Admin struct {
 // currently running (the same signal /readyz uses). A nil healthy treats
 // the process as always healthy. Non-platform-admin authorization fails
 // closed (503) while healthy reports false — see authorizeOrgRole.
-func NewAdmin(auth Authenticator, rs ReadStore, orgRT OrgRuntime, keyRT KeyRuntime, aliasRT AliasRuntime, resync func(ctx context.Context) error, healthy func() bool) *Admin {
-	return &Admin{auth: auth, rs: rs, orgRT: orgRT, keyRT: keyRT, aliasRT: aliasRT, resync: resync, healthy: healthy}
+//
+// usage is Task 8's optional ClickHouse-backed usage reader; nil means GET
+// /admin/v1/usage reports 501 not_configured (see usage.go's getUsage).
+func NewAdmin(auth Authenticator, rs ReadStore, orgRT OrgRuntime, keyRT KeyRuntime, aliasRT AliasRuntime, resync func(ctx context.Context) error, healthy func() bool, usage UsageReader) *Admin {
+	return &Admin{auth: auth, rs: rs, orgRT: orgRT, keyRT: keyRT, aliasRT: aliasRT, resync: resync, healthy: healthy, usage: usage}
 }
 
 // isHealthy is the nil-safe accessor for Admin.healthy.
@@ -129,6 +137,8 @@ func (a *Admin) Routes() *http.ServeMux {
 
 	mux.HandleFunc("POST /admin/v1/projections/resync", a.resyncProjections)
 
+	mux.HandleFunc("GET /admin/v1/usage", a.getUsage)
+
 	// Catch-all: any /admin/v1/* request that doesn't match one of the
 	// patterns above (unknown path, or a known path with the wrong
 	// method) gets our OpenAI-style JSON body instead of net/http's
@@ -154,6 +164,9 @@ const (
 	errTypeConflict           = "conflict_error"
 	errTypeInternal           = "internal_error"
 	errTypeServiceUnavailable = "service_unavailable"
+	// errTypeNotConfigured is getUsage's (usage.go) 501 error type when no
+	// UsageReader is wired (no clickhouse_dsn configured).
+	errTypeNotConfigured = "not_configured"
 )
 
 // ErrProjectionsUnhealthy is authorizeOrgRole's fail-closed sentinel

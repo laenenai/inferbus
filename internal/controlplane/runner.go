@@ -235,6 +235,25 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("controlplane: read store: %w", err)
 	}
 
+	// usageReader is Task 8's optional ClickHouse-backed usage reader:
+	// nil (the default, when Config.ClickhouseDSN is empty) leaves GET
+	// /admin/v1/usage reporting 501 not_configured rather than failing
+	// the whole control plane over an optional dependency. When
+	// configured, its connection is closed on every exit path via defer
+	// — this happens after the shutdown sequence below (which fully
+	// stops HTTP/projectors/relay) since defers run in the reverse order
+	// they were registered, same as the pool.Close() above it.
+	var usageReader UsageReader
+	if r.cfg.ClickhouseDSN != "" {
+		ur, err := NewCHUsageReader(ctx, r.cfg.ClickhouseDSN)
+		if err != nil {
+			stopRelay()
+			return fmt.Errorf("controlplane: clickhouse usage reader: %w", err)
+		}
+		defer ur.Close()
+		usageReader = ur
+	}
+
 	orgRT := aggregate.NewRuntime(r.store, org.Decider, org.Codec())
 	keyRT := aggregate.NewRuntime(r.store, apikey.Decider, apikey.Codec())
 	aliasRT := aggregate.NewRuntime(r.store, alias.Decider, alias.Codec())
@@ -283,7 +302,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	authenticator := NewAuthenticator(r.cfg, verifier)
 
-	admin := NewAdmin(authenticator, rs, orgRT, keyRT, aliasRT, resyncFn, h.ok)
+	admin := NewAdmin(authenticator, rs, orgRT, keyRT, aliasRT, resyncFn, h.ok, usageReader)
 	mux := admin.Routes()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

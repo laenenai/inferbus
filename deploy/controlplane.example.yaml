@@ -6,3 +6,4 @@ nats_url: nats://localhost:4222
 #   audience: "[YOUR-AUDIENCE]"
 platform_admins: []
 bootstrap_token: dev_admin_change_me
+# clickhouse_dsn: "clickhouse://localhost:9000/inferbus"  # optional: enables GET /admin/v1/usage
