@@ -66,7 +66,7 @@ func newAdminFixture(t *testing.T, cfg Config, verifier TokenVerifier, resync fu
 	if resync == nil {
 		resync = func(context.Context) error { return nil }
 	}
-	admin := NewAdmin(NewAuthenticator(cfg, verifier), rs, orgRT, keyRT, aliasRT, resync, healthy)
+	admin := NewAdmin(NewAuthenticator(cfg, verifier), rs, orgRT, keyRT, aliasRT, resync, healthy, nil)
 	return &adminFixture{admin: admin, rs: rs, orgRT: orgRT, keyRT: keyRT, aliasRT: aliasRT}
 }
 
@@ -572,7 +572,7 @@ func TestAdmin_ConflictRetryOnce_ThenFailOn409(t *testing.T) {
 	// Bootstrap is PlatformAdmin, so authorizeOrg short-circuits without
 	// ever consulting a ReadStore — this test needs none of the
 	// SQL-projector machinery, just the retry-then-409 dispatch path.
-	admin := NewAdmin(NewAuthenticator(cfg, &fakeVerifier{}), NewMemReadStore(), orgRT, keyRT, aliasRT, func(context.Context) error { return nil }, nil)
+	admin := NewAdmin(NewAuthenticator(cfg, &fakeVerifier{}), NewMemReadStore(), orgRT, keyRT, aliasRT, func(context.Context) error { return nil }, nil, nil)
 	mux := admin.Routes()
 
 	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{

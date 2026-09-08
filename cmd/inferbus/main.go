@@ -27,7 +27,7 @@ func run(args []string, stdout io.Writer) int {
 	case "controlplane":
 		return runControlplane(args[1:], stdout)
 	case "harvester":
-		return notImplemented(args[0], stdout)
+		return runHarvester(args[1:], stdout)
 	default:
 		fmt.Fprintf(stdout, "unknown subcommand %q\n", args[0])
 		usage(stdout)

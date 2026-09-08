@@ -155,9 +155,21 @@ func truncateHash(s string) string {
 // request path consults it (through the optional readinessChecker
 // interface) and answers 503 rather than silently treating "haven't
 // scanned yet" the same as "every key was revoked".
+//
+// BUDGETS (Task 7) is a third watch using the exact same scan+watch/probe/
+// backoff machinery, but it is deliberately NOT part of Ready(): unlike
+// KEYS/ALIASES (without which the gateway cannot make an auth decision at
+// all), a missing or not-yet-created BUDGETS bucket is a perfectly normal
+// deployment state — the control plane's usage harvester (M4) may start
+// after the gateway, or may not run at all. An absent bucket or an absent
+// per-key entry both mean "no budget tracked for this key" — i.e. allow —
+// never "block until budgets show up." watchBudgets below polls with the
+// same bounded backoff as the other two buckets, forever, in the
+// background, independently of k.ready.
 type KVIAM struct {
-	keys    atomic.Pointer[map[string]KeyConfig] // hash hex -> row
-	aliases atomic.Pointer[map[string]string]    // "<scope>/<name>" -> target
+	keys    atomic.Pointer[map[string]KeyConfig]        // hash hex -> row
+	aliases atomic.Pointer[map[string]string]           // "<scope>/<name>" -> target
+	budgets atomic.Pointer[map[string]cpkv.BudgetEntry] // key id -> budget row
 	ready   chan struct{}
 }
 
@@ -174,11 +186,14 @@ func NewKVIAM(ctx context.Context, js jetstream.JetStream) (*KVIAM, error) {
 	k := &KVIAM{ready: make(chan struct{})}
 	emptyKeys := map[string]KeyConfig{}
 	emptyAliases := map[string]string{}
+	emptyBudgets := map[string]cpkv.BudgetEntry{}
 	k.keys.Store(&emptyKeys)
 	k.aliases.Store(&emptyAliases)
+	k.budgets.Store(&emptyBudgets)
 
 	keysReady := make(chan struct{})
 	aliasesReady := make(chan struct{})
+	budgetsReady := make(chan struct{}) // never waited on — see BUDGETS doc comment above
 
 	go watchKV(ctx, js, cpkv.BucketKeys, keysReady, func(entries map[string]jetstream.KeyValueEntry) {
 		m := make(map[string]KeyConfig, len(entries))
@@ -188,7 +203,7 @@ func NewKVIAM(ctx context.Context, js jetstream.JetStream) (*KVIAM, error) {
 				slog.Error("gateway: kviam: decode KEYS entry", "hash", truncateHash(hash), "err", err)
 				continue
 			}
-			m[hash] = KeyConfig{Name: row.Name, Org: row.Org, Project: row.Project, Allow: row.Allow}
+			m[hash] = KeyConfig{ID: row.Id, Name: row.Name, Org: row.Org, Project: row.Project, Allow: row.Allow}
 		}
 		k.keys.Store(&m)
 		slog.Info("gateway: kviam: IAM snapshot applied", "bucket", cpkv.BucketKeys, "entries", len(m))
@@ -206,6 +221,22 @@ func NewKVIAM(ctx context.Context, js jetstream.JetStream) (*KVIAM, error) {
 		}
 		k.aliases.Store(&m)
 		slog.Info("gateway: kviam: IAM snapshot applied", "bucket", cpkv.BucketAliases, "entries", len(m))
+	})
+
+	// BUDGETS: same watch machinery, deliberately excluded from the
+	// keysReady/aliasesReady rendezvous below — see the KVIAM doc comment.
+	go watchKV(ctx, js, cpkv.BucketBudgets, budgetsReady, func(entries map[string]jetstream.KeyValueEntry) {
+		m := make(map[string]cpkv.BudgetEntry, len(entries))
+		for keyID, e := range entries {
+			var row cpkv.BudgetEntry
+			if err := json.Unmarshal(e.Value(), &row); err != nil {
+				slog.Error("gateway: kviam: decode BUDGETS entry", "key", truncateHash(keyID), "err", err)
+				continue
+			}
+			m[keyID] = row
+		}
+		k.budgets.Store(&m)
+		slog.Info("gateway: kviam: IAM snapshot applied", "bucket", cpkv.BucketBudgets, "entries", len(m))
 	})
 
 	go func() {
@@ -259,6 +290,20 @@ func (k *KVIAM) ResolveAlias(org, alias string) (string, bool) {
 	}
 	target, ok := m[cpkv.GlobalScope+"/"+alias]
 	return target, ok
+}
+
+// BudgetExceeded reports whether keyID (the KEYS entry's stable id — see
+// keyID in gateway.go) currently has a BUDGETS entry with Exceeded set. A
+// key with no entry at all — because the BUDGETS bucket doesn't exist yet,
+// the harvester hasn't projected anything for it, or the key has no budget
+// configured — is not exceeded: absence means "no budget tracked," which is
+// "allow," the same way KEYS/ALIASES treat absence as their own default.
+// This is a pure map lookup against the most recent watch snapshot; it
+// never itself touches NATS.
+func (k *KVIAM) BudgetExceeded(keyID string) bool {
+	m := *k.budgets.Load()
+	entry, ok := m[keyID]
+	return ok && entry.Exceeded
 }
 
 // watchKV runs bucket's scan+watch loop until ctx is done. On every

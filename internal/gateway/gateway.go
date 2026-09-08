@@ -74,6 +74,25 @@ type readinessChecker interface {
 	Ready() <-chan struct{}
 }
 
+// budgetChecker is satisfied by an iamProvider that can report a key's
+// monthly token budget as exhausted — currently only *KVIAM, sourcing the
+// optional BUDGETS bucket (Task 7). staticIAM does not implement this
+// interface at all, so budgetExceeded's type assertion simply fails for it
+// and static-mode gateways never run a budget check — M2's static Config
+// has no notion of usage tracking, and Task 7 deliberately leaves it that
+// way rather than bolting a permanently-false BudgetExceeded onto
+// staticIAM.
+type budgetChecker interface {
+	BudgetExceeded(keyID string) bool
+}
+
+// budgetExceeded reports whether key's budget is exhausted, for iam
+// implementations that track one at all (kv mode only — see budgetChecker).
+func (g *Gateway) budgetExceeded(key KeyConfig) bool {
+	bc, ok := g.iam.(budgetChecker)
+	return ok && bc.BudgetExceeded(keyID(key))
+}
+
 // isReady reports whether g.iam is either not a readinessChecker at all
 // (static mode) or has completed its startup Ready() signal (kv mode,
 // once both buckets have their first snapshot).
@@ -160,6 +179,19 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// keyID returns key's stable attribution id for relay.Request.KeyID (M4
+// Task 1, design-usage.md §3): key.ID when set — the apikey aggregate's
+// stream id in kv mode, or an operator-supplied `id:` in static mode — or
+// key.Name otherwise. The fallback covers both static config with no `id:`
+// configured and KV entries projected before this field existed (old
+// entries decode Id as "").
+func keyID(key KeyConfig) string {
+	if key.ID != "" {
+		return key.ID
+	}
+	return key.Name
+}
+
 func newReqID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
@@ -202,6 +234,10 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		oaiError(w, http.StatusForbidden, "model_forbidden", fmt.Sprintf("key is not allowed to use %q", req.Model))
 		return
 	}
+	if g.budgetExceeded(key) {
+		oaiError(w, http.StatusPaymentRequired, "budget_exhausted", "monthly token budget exhausted")
+		return
+	}
 
 	reqID := newReqID()
 	ctx := r.Context()
@@ -215,7 +251,7 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer l.Close()
 
 	seq, err := relay.Publish(ctx, g.js, relay.Request{
-		Model: target, Org: key.Org, Project: key.Project, KeyID: key.Name,
+		Model: target, Org: key.Org, Project: key.Project, KeyID: keyID(key),
 		Alias: req.Model, ReqID: reqID, Kind: "chat", Deadline: deadline, Body: body,
 	})
 	if err != nil {

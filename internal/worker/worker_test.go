@@ -499,7 +499,7 @@ func TestStreamZeroUsageMarkedEstimated(t *testing.T) {
 }
 
 // panicEngine is a minimal ibengine.Engine whose ChatStream always panics,
-// used to exercise the worker's per-message panic recovery (I7): the
+// used to exercise the worker's per-message panic recovery: the
 // panicking goroutine must not take the worker process down, the client
 // must get a normal RemoteError, and the worker must remain able to serve
 // subsequent requests.

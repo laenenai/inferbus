@@ -1,0 +1,38 @@
+# Harvester configuration example.
+#
+# The endpoints below are host-reachable: they match the ports the compose
+# stack in this directory publishes (nats 4222, clickhouse 9000), so
+#
+#   inferbus harvester -config deploy/harvester.example.yaml
+#
+# works from your machine against `docker compose up`. The harvester
+# service INSIDE compose reaches the same servers by their compose
+# hostnames instead, which docker-compose.yaml supplies as environment
+# overrides (INFERBUS_NATS_URL, INFERBUS_CLICKHOUSE_DSN) — this file needs
+# no edit for either use.
+
+# addr is the HTTP address for healthz/readyz probes (defaults to ":8082" if not set).
+addr: ":8082"
+
+# nats_url is the URL to connect to NATS (required).
+# Overridden by INFERBUS_NATS_URL when set.
+nats_url: "nats://localhost:4222"
+
+# clickhouse_dsn is the connection string to ClickHouse, on its native
+# protocol port 9000 (required). Overridden by INFERBUS_CLICKHOUSE_DSN when
+# set. Note: the database (inferbus) must already exist in ClickHouse.
+clickhouse_dsn: "clickhouse://inferbus:inferbus@localhost:9000/inferbus"
+
+# batch_max_events is the number of accumulated usage events that triggers an
+# immediate flush to ClickHouse, regardless of batch_max_interval (defaults to 500).
+batch_max_events: 500
+
+# batch_max_interval is the maximum time accumulated events sit unflushed
+# before a flush is forced, regardless of batch_max_events (defaults to 2s).
+batch_max_interval: "2s"
+
+# budget_refresh_interval is how often the budget ledger republishes dirty
+# BUDGETS KV entries and checks for a month rollover (defaults to 10s).
+# Budgets themselves are learned from a live watch on the KEYS bucket, not
+# from a poll on this interval.
+budget_refresh_interval: "10s"

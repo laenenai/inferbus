@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -235,6 +236,20 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("controlplane: read store: %w", err)
 	}
 
+	// usageReader is Task 8's optional ClickHouse-backed usage reader:
+	// nil (when Config.ClickhouseDSN is empty, or when ClickHouse is
+	// unreachable at boot) leaves GET /admin/v1/usage
+	// reporting 501 not_configured rather than failing the whole control
+	// plane over an optional dependency. When configured and reachable,
+	// its connection is closed on every exit path via defer — this
+	// happens after the shutdown sequence below (which fully stops
+	// HTTP/projectors/relay) since defers run in the reverse order they
+	// were registered, same as the pool.Close() above it.
+	usageReader := newUsageReader(ctx, r.cfg.ClickhouseDSN)
+	if c, ok := usageReader.(io.Closer); ok {
+		defer c.Close()
+	}
+
 	orgRT := aggregate.NewRuntime(r.store, org.Decider, org.Codec())
 	keyRT := aggregate.NewRuntime(r.store, apikey.Decider, apikey.Codec())
 	aliasRT := aggregate.NewRuntime(r.store, alias.Decider, alias.Codec())
@@ -283,7 +298,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	authenticator := NewAuthenticator(r.cfg, verifier)
 
-	admin := NewAdmin(authenticator, rs, orgRT, keyRT, aliasRT, resyncFn, h.ok)
+	admin := NewAdmin(authenticator, rs, orgRT, keyRT, aliasRT, resyncFn, h.ok, usageReader)
 	mux := admin.Routes()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -299,7 +314,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	})
 
-	srv := &http.Server{Addr: r.cfg.Addr, Handler: mux}
+	// I10: a ReadHeaderTimeout so a client cannot pin a connection open
+	// indefinitely mid-request-line. No WriteTimeout: resyncProjections can
+	// legitimately hold a response open for its own (longer) timeout.
+	srv := &http.Server{Addr: r.cfg.Addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- srv.ListenAndServe() }()
 

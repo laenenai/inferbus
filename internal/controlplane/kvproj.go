@@ -385,11 +385,13 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 		// hypothetically re-run) allowlist change believe a hash exists
 		// in KEYS that was never actually written.
 		if err := p.put(ctx, c.GetHash(), KeyEntry{
-			Org:          c.GetOrg(),
-			Project:      c.GetProject(),
-			Name:         c.GetName(),
-			Allow:        c.GetAllow(),
-			RateLimitRPM: int(c.GetRateLimitRpm()),
+			Id:                 id,
+			Org:                c.GetOrg(),
+			Project:            c.GetProject(),
+			Name:               c.GetName(),
+			Allow:              c.GetAllow(),
+			RateLimitRPM:       int(c.GetRateLimitRpm()),
+			MonthlyTokenBudget: c.GetMonthlyTokenBudget(),
 		}); err != nil {
 			return err
 		}
@@ -403,12 +405,22 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 			return err
 		}
 		if !ok {
-			// Defensive: Created always precedes Rotated for a valid
-			// aggregate stream, so this should be unreachable, but a
-			// missing previous entry must never fail the projector —
-			// synthesize a minimal one rather than losing the key.
-			entry = KeyEntry{}
+			// Fail-stop, consistent with the
+			// AllowlistChanged/LimitsChanged arms below.
+			// Synthesizing KeyEntry{} here would Put a live key hash whose
+			// entry has an empty Org/Project/Allow — an authenticated
+			// identity in a nonexistent tenant, budget-exempt because it
+			// also has no Id. Created always precedes Rotated for a valid
+			// stream (and the decider refuses to rotate a disabled key), so
+			// a missing previous entry is an invariant violation, not a
+			// normal case to paper over.
+			return fmt.Errorf("controlplane: keys projector: rotate for key id %q: no KEYS entry under previous hash %q (invariant violation)", id, r.GetPreviousHash())
 		}
+		// Backfill Id on every read-modify-write arm, so a
+		// KEYS entry projected before M4 introduced KeyEntry.Id gains one as
+		// soon as anything touches it (the budget ledger skips entries with
+		// an empty Id).
+		entry.Id = id
 		if err := p.put(ctx, r.GetNewHash(), entry); err != nil {
 			return err
 		}
@@ -433,7 +445,7 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 			return err
 		}
 		if !ok {
-			// C2 ruling: a hash the map believes is current but that has
+			// A hash the map believes is current but that has
 			// no KEYS entry is an invariant violation (every hash in
 			// hashByID was put there by a successful Created/Rotated KV
 			// write), not a normal case to paper over. Silently
@@ -442,18 +454,19 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 			// under a real key's hash. Fail-stop instead.
 			return fmt.Errorf("controlplane: keys projector: allowlist change for key id %q: no KEYS entry under hash %q (invariant violation)", id, hash)
 		}
+		entry.Id = id // backfill — see the Rotated arm above.
 		entry.Allow = k.AllowlistChanged.GetAllow()
 		return p.put(ctx, hash, entry)
 
 	case *controlplanev1.ApiKeyEvent_LimitsChanged:
-		// MonthlyTokenBudget is intentionally NOT projected into KeyEntry:
-		// the KV bucket is the gateway's request-time, data-plane read
-		// model (auth/allowlist/rate-limit only), and budget enforcement
-		// is an M4 concern with its own read model, not this one. The
-		// ADMIN read model (KeyRow/cp_api_keys, readmodel.go) DOES carry
-		// MonthlyTokenBudget — GET /admin/v1/keys surfaces it (I5) — so
-		// this is a deliberate data-plane/control-plane split, not an
-		// oversight.
+		// MonthlyTokenBudget IS projected into KeyEntry as of M4 Task 1
+		// (design-usage.md §3), superseding the earlier M3 ruling that kept
+		// it out of KEYS: the M4 budget-ledger harvester needs the current
+		// budget available data-plane-side (via KV) without a control-plane
+		// round trip. The ADMIN read model (KeyRow/cp_api_keys,
+		// readmodel.go) still carries it too — GET /admin/v1/keys surfaces
+		// it — that split is unaffected, this just adds a second,
+		// data-plane-facing copy.
 		hash, ok := p.hashByID[id]
 		if !ok {
 			return fmt.Errorf("controlplane: keys projector: limits change for unknown key id %q", id)
@@ -467,7 +480,14 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 			// Put a phantom entry.
 			return fmt.Errorf("controlplane: keys projector: limits change for key id %q: no KEYS entry under hash %q (invariant violation)", id, hash)
 		}
+		// Without this backfill, setting a budget on a
+		// pre-M4 KEYS entry (projected before KeyEntry gained Id) was a
+		// silent permanent no-op — the entry carried the budget, but the
+		// budget ledger skips every entry with an empty Id, so the key
+		// never got a BUDGETS entry and never hit 402.
+		entry.Id = id
 		entry.RateLimitRPM = int(k.LimitsChanged.GetRateLimitRpm())
+		entry.MonthlyTokenBudget = k.LimitsChanged.GetMonthlyTokenBudget()
 		return p.put(ctx, hash, entry)
 	}
 	return nil

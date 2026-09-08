@@ -36,7 +36,8 @@ the client as SSE. Workers also emit per-request usage events onto a
 - **Metering built in** — every request (success, error, or cancel) emits a
   usage event with tokens, TTFT, queue time, and provider attribution.
 
-**Status:** pre-alpha (M2 — data path). See [docs/design.md](docs/design.md)
+**Status:** pre-alpha (M4 — data path, control plane, and usage pipeline
+shipped). See [docs/design.md](docs/design.md)
 for the full design spec and milestone plan, and
 [docs/design/console-mock](docs/design/console-mock) for the management
 console design (Design Component artboards for the planned v2 console).
@@ -44,12 +45,12 @@ console design (Design Component artboards for the planned v2 console).
 ## Architecture
 
 ```
-                      control plane (planned, M3)
-   console (v2) ──OIDC──▶ admin API ──▶ Postgres (orgs, projects, keys, aliases)
-                          │                        │ write-through projection
-                          │                        ▼
-                          │              NATS KV: ALIASES ◀── watch ── gateways
-                          └──────────────────────────────────────────────────
+              control plane (built) — event-sourced on es-lite
+   console (v2) ──OIDC──▶ admin API ──append──▶ Postgres event log
+                          │                              │ relay
+                          │                              ▼
+                          │            NATS KV: ALIASES · KEYS ◀── watch ── gateways
+                          └────────────────────────────────────────────────────────
 
    client (OpenAI SDK)
         │ HTTP/SSE
@@ -59,36 +60,49 @@ console design (Design Component artboards for the planned v2 console).
    │  auth     │           │ (work-queue,         │        │        │                  │ openai_http: Ollama,  │
    │  alias    │           │  consumer per model) │        │        │                  │  vLLM, llama.cpp      │
    │  resolve  │           └──────────────────────┘        │        │                  │ bifrost: embedded     │
-   └───────────┘                                           │        │                  │  multi-provider router│
-        │  ▲                                               │        │                  └───────────────────────┘
+   │  budget   │                                           │        │                  │  multi-provider router│
+   └───────────┘                                           │        │                  └───────────────────────┘
+        │  ▲                                               │        │
         │  └──────────────── core NATS ────────────────────┘        │
         │      inference.resp.<req_id> {chunk|done|result|error}    │ publish usage
         ▼                                                           ▼
-      SSE to client                    JetStream METERING ──pull──▶ harvester (planned) ──▶ ClickHouse (planned)
+      SSE to client                    JetStream METERING ──pull──▶ harvester ──▶ ClickHouse
+                                                                         │
+                                                                         └─▶ NATS KV: BUDGETS
+                                                                             ◀── watch ── gateways (402 when exceeded)
 ```
 
-**Data plane (built).** The gateway authenticates the caller's API key against
-a static YAML key list, resolves the request's model alias to a concrete
-model via a static YAML alias map, and publishes the request onto the
-`INFERENCE` JetStream stream (work-queue retention, one durable consumer per
-concrete model). A worker pulls the message, runs it through its configured
-engine, and streams response frames back over a per-request core-NATS
-subject; the gateway relays those frames to the client, either as SSE
-(`stream: true`) or as a single JSON body. Client disconnects and per-request
-deadlines are handled as cancellation (see Wire contract below).
+**Data plane (built).** The gateway authenticates the caller's API key —
+either against a static YAML key list or, in `iam.mode: kv`, against the
+control plane's projected `KEYS` KV state — resolves the request's model
+alias to a concrete model (static YAML map, or the projected `ALIASES` KV in
+kv mode), and publishes the request onto the `INFERENCE` JetStream stream
+(work-queue retention, one durable consumer per concrete model). A worker
+pulls the message, runs it through its configured engine, and streams
+response frames back over a per-request core-NATS subject; the gateway
+relays those frames to the client, either as SSE (`stream: true`) or as a
+single JSON body. Client disconnects and per-request deadlines are handled
+as cancellation (see Wire contract below).
 
-**Usage plane (partially built).** Every worker request — success, error, or
-cancellation — produces a `wire.UsageEvent` published to the `METERING`
-stream, keyed by org/project/model. This side is implemented in the worker
-today. The **harvester** that consumes `METERING` and writes it into
-ClickHouse, and the budget/dashboard reads on top of it, are planned (M4).
+**Control plane (built).** Event-sourced on
+[es-lite](https://github.com/laenenai/es-lite), with Postgres as the durable
+event log — orgs, projects, API keys, and aliases are aggregates, not
+tables. An OIDC-gated admin HTTP API (plus a bootstrap token for dev/CI)
+dispatches commands; a relay projects committed events onto the `ALIASES`
+and `KEYS` NATS KV buckets that gateways watch live, and onto Postgres read
+tables for admin GETs. A gateway running `iam.mode: kv` picks up org/key/alias
+changes with no restart and no control-plane round trip per request; `static`
+mode (inline YAML keys/aliases) remains for dev and tests. Workers never talk
+to the control plane or to Postgres — they need only a NATS URL and their
+engine endpoints. See [docs/design-controlplane.md](docs/design-controlplane.md).
 
-**Control plane (planned).** The design calls for a Postgres-backed store of
-orgs, projects, API keys, and aliases, an OIDC-gated admin HTTP API, and a
-projection of the alias table into a NATS KV bucket that gateways watch for
-live updates. None of this exists yet: keys and aliases are loaded once from
-gateway YAML at startup. Workers never talk to the control plane or to
-Postgres — they need only a NATS URL and their engine endpoints.
+**Usage plane (built).** Every worker request — success, error, or
+cancellation — publishes a `wire.UsageEvent` to the `METERING` stream, keyed
+by org/project/model. The **harvester** consumes it, batches inserts into
+ClickHouse, and its budget ledger folds each key's month-to-date usage into
+the `BUDGETS` NATS KV bucket; a gateway in kv mode watches that bucket and
+rejects further requests from an exhausted key with `402`. See
+[docs/design-usage.md](docs/design-usage.md) and the Budgets section below.
 
 ## Status
 
@@ -100,7 +114,7 @@ Postgres — they need only a NATS URL and their engine endpoints.
 | Bifrost engine (multi-provider: OpenAI, Anthropic, Ollama, ...) | done |
 | Static YAML keys/aliases | done |
 | Postgres control plane + KV alias projection | done — [see design-controlplane.md](docs/design-controlplane.md) |
-| Harvester + ClickHouse usage pipeline | planned (M4) |
+| Harvester + ClickHouse usage pipeline + budget enforcement | done — [see design-usage.md](docs/design-usage.md) |
 | Admission control / priority tiers | planned (M5 / v1.5) |
 | OIDC admin API + console | planned (v2) |
 
@@ -108,33 +122,39 @@ Postgres — they need only a NATS URL and their engine endpoints.
 
 ```sh
 docker compose -f deploy/docker-compose.yaml up -d --build
+```
+
+The compose file brings up the whole stack: NATS (JetStream), Postgres,
+ClickHouse, the gateway (port 8080), one worker, the control plane (port
+8081), and the harvester (port 8082). Every service is load-bearing —
+nothing in it is idle scaffolding.
+
+The compose gateway runs in `iam.mode: kv` (`deploy/gateway.kv.example.yaml`),
+so keys and aliases come from the control plane rather than a checked-in
+YAML credential, and monthly token budgets are enforced. Create an org, a
+project, an alias, and a key first (steps 2–5 below), then call the gateway
+with the key that step 5 returns:
+
+```sh
 curl http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer ib_dev_change_me" \
+  -H "Authorization: Bearer $IB_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"fast","stream":true,"messages":[{"role":"user","content":"hello"}]}'
 ```
 
-The compose file brings up NATS (JetStream), the gateway (port 8080), and one
-worker. The worker's example config (`deploy/worker.example.yaml`) points at
+The worker's example config (`deploy/worker.example.yaml`) points at
 `http://host.docker.internal:11434` so the containerized worker can reach a
 model server (e.g. Ollama running `llama3.2`) on the Docker host; if your
 engine runs in-network instead (its own compose service, or another
-container), change that URL to the service's name. The example key
-`ib_dev_change_me` is allowed to use the alias `fast`, which resolves to the
-concrete model `llama3.2`.
+container), change that URL to the service's name.
 
-**Change the example key before exposing the gateway to anything but your own
-machine** — `ib_dev_change_me` is a public, checked-in credential.
+Until the gateway's first KEYS/ALIASES scan completes (i.e. while the
+control plane is still starting), `GET /readyz` and every authenticated
+request answer 503 rather than 401.
 
-Postgres and ClickHouse containers are also defined in the compose file for
-forward compatibility with the control plane and usage pipeline.
+## Control plane
 
-## Control plane (optional)
-
-The quickstart above uses static YAML keys and aliases. To enable the
-Postgres-backed control plane instead:
-
-1. Start the full stack (control plane service starts automatically):
+1. Start the stack (the control plane service starts automatically):
 ```sh
 docker compose -f deploy/docker-compose.yaml up -d --build
 ```
@@ -155,12 +175,14 @@ curl -X POST http://localhost:8081/admin/v1/orgs/acme/projects \
   -d '{"id":"default","name":"Default"}'
 ```
 
-4. Set an alias:
+4. Set an alias. The target must be NATS-subject-safe (lowercase
+`[a-z0-9-]`), which is the same token a worker's model name resolves to —
+so a worker serving `llama3.2` is reached by the target `llama3-2`:
 ```sh
 curl -X PUT http://localhost:8081/admin/v1/aliases/acme/fast \
   -H "Authorization: Bearer dev_admin_change_me" \
   -H "Content-Type: application/json" \
-  -d '{"target":"llama3.2"}'
+  -d '{"target":"llama3-2"}'
 ```
 
 5. Create an API key:
@@ -170,25 +192,77 @@ curl -X POST http://localhost:8081/admin/v1/keys \
   -H "Content-Type: application/json" \
   -d '{"org":"acme","project":"default","name":"dev","allow":["fast"]}'
 ```
-The response includes the plaintext key (shown once); use it in the data-plane
-chat curl instead of `ib_dev_change_me`.
+The response includes the plaintext key (shown once); export it as `IB_KEY`
+and use it in the Quickstart's chat curl.
 
-6. Switch the gateway to KV mode by editing `deploy/gateway.example.yaml`:
-Replace the entire `keys:` and `aliases:` blocks with:
-```yaml
-iam:
-  mode: kv
+6. Read an org's usage (requires the control plane's optional
+`clickhouse_dsn`, which the compose config sets; otherwise this answers 501):
+```sh
+curl "http://localhost:8081/admin/v1/usage?org=acme&window=7d" \
+  -H "Authorization: Bearer dev_admin_change_me"
+```
+`window` is one of `24h`, `7d`, `30d`; the response buckets an org's usage by
+model, alias, provider, and status.
+
+**Static mode (no control plane).** To run the gateway against a checked-in
+YAML key list instead, mount `deploy/gateway.example.yaml` in the compose
+gateway service (it ships the example key `ib_dev_change_me` allowed to use
+the alias `fast` → `llama3.2`) and restart it. **Change that key before
+exposing the gateway to anything but your own machine** — it is a public,
+checked-in credential. KV mode forbids a static `keys:` list and errors on
+startup if it finds one; static mode has no budget enforcement.
+
+## Budgets (optional)
+
+Requires the control plane, the harvester, and a gateway in `iam.mode: kv`
+— the default compose stack is exactly that (a static-mode gateway has no
+`BUDGETS` projection to watch and never returns 402). Create a key with a
+monthly token budget:
+
+```sh
+curl -X POST http://localhost:8081/admin/v1/keys \
+  -H "Authorization: Bearer dev_admin_change_me" \
+  -H "Content-Type: application/json" \
+  -d '{"org":"acme","project":"default","name":"dev","allow":["fast"],"monthly_token_budget":100000}'
 ```
 
-Then restart the gateway and try the same chat curl with your created key.
+The harvester's budget ledger folds `METERING` usage into that key's
+month-to-date token total and republishes it to the `BUDGETS` NATS KV bucket
+on every `budget_refresh_interval` tick (default 10s — see
+`deploy/harvester.example.yaml`). Once a key's month-to-date usage reaches
+its budget, a gateway in kv mode rejects further requests from it with:
 
-**Note:** KV mode forbids a static `keys:` list in the config and will error
-on startup if found. The gateway `/readyz` endpoint gates on IAM sync. To
-re-enable static mode, revert the gateway config and restart.
+```json
+{"error":{"type":"budget_exhausted","message":"monthly token budget exhausted"}}
+```
+
+Raise (or clear, with `0`) the budget with:
+
+```sh
+curl -X PUT http://localhost:8081/admin/v1/keys/<id>/limits \
+  -H "Authorization: Bearer dev_admin_change_me" \
+  -H "Content-Type: application/json" \
+  -d '{"monthly_token_budget":1000000}'
+```
+
+**Upgrading an M3 deployment.** KEYS entries projected before M4 carry no
+key id, and the budget ledger can only attribute a budget to an entry that
+has one. Any key you touch afterwards (limits, allowlist, rotation) is
+backfilled automatically; to heal every entry at once, run
+`POST /admin/v1/projections/resync` on the control plane after upgrading.
+
+Enforcement is eventually consistent by design (docs/design-usage.md's
+amendment to §11): a request in the window between crossing the budget and
+the next ledger flush plus gateway KV-watch propagation may still succeed.
+Static mode has no budget enforcement — there is no `BUDGETS` projection to
+watch.
 
 ## Configuration
 
-Gateway (`deploy/gateway.example.yaml`) — static IAM and alias table:
+Gateway — the compose stack uses `deploy/gateway.kv.example.yaml` (control
+plane as the source of keys and aliases, budgets enforced). The static
+alternative, `deploy/gateway.example.yaml`, carries its own IAM and alias
+table:
 
 ```yaml
 addr: ":8080"
@@ -236,6 +310,10 @@ the Docker host from inside the worker's container (requires the compose
 file's `extra_hosts: host-gateway` mapping); point it at an in-network
 service name instead if your engine runs alongside the worker.
 
+A worker's model list is read once at startup — there is no live reload.
+Adding, removing, or reconfiguring a model requires restarting the worker
+process.
+
 `max_inflight` is not a per-worker concurrency knob: it maps directly to that
 model's JetStream consumer `MaxAckPending`, which is a **fleet-wide** cap on
 un-acked in-flight messages shared by every worker serving that model. If
@@ -243,6 +321,28 @@ multiple workers configure different `max_inflight` values for the same
 model, whichever worker most recently (re)created the consumer wins for the
 whole fleet — keep the value consistent across workers serving the same
 model.
+
+Harvester (`deploy/harvester.example.yaml`) — no HTTP config beyond its own
+healthz/readyz probes; consumes `METERING`, writes ClickHouse, and projects
+budgets:
+
+```yaml
+nats_url: nats://localhost:4222
+clickhouse_dsn: "clickhouse://inferbus:inferbus@localhost:9000/inferbus"
+batch_max_events: 500        # flush trigger: accumulated events (default 500)
+batch_max_interval: 2s       # flush trigger: time since last flush (default 2s)
+budget_refresh_interval: 10s # how often dirty BUDGETS KV entries are republished
+                             # and month rollover is checked (default 10s).
+                             # Budgets themselves arrive on a live KEYS watch.
+```
+
+The compose file already runs this as the `harvester` service, gated on both
+`nats` and `clickhouse` being healthy; it points the same file at the
+compose network with `INFERBUS_NATS_URL` and `INFERBUS_CLICKHOUSE_DSN`
+(either environment variable overrides its config counterpart). The
+endpoints in the file are the ports compose publishes to the host, so
+running it standalone against that stack works as written:
+`inferbus harvester -config deploy/harvester.example.yaml`.
 
 ## Wire contract
 
@@ -253,7 +353,7 @@ model.
 | `inference.req.<model>` | gateway → worker | `INFERENCE` work-queue stream, one consumer per concrete model |
 | `inference.resp.<req_id>` | worker → gateway | core NATS, per-request response frames |
 | `inference.cancel.<req_id>` | gateway → worker | core NATS, published on client disconnect |
-| `metering.usage.<org>.<project>.<model>` | worker → (future) harvester | `METERING` stream, usage accounting |
+| `metering.usage.<org>.<project>.<model>` | worker → harvester | `METERING` stream, usage accounting |
 
 Response frames (`wire.Message`) carry a `kind`: `chunk` (an OpenAI SSE chunk,
 verbatim), `done` (closes a streamed response, carries final usage), `result`
@@ -289,7 +389,7 @@ on every push and pull request.
 | Milestone | Scope |
 |---|---|
 | **M3** | ✅ shipped — Control plane: event-sourced on [es-lite](https://github.com/laenenai/es-lite) with orgs/projects/keys/aliases, admin API, NATS KV projections watched live by gateways, OIDC — see [docs/design-controlplane.md](docs/design-controlplane.md) |
-| **M4** | Usage pipeline: `harvester` consuming `METERING` into ClickHouse; budget enforcement reads |
+| **M4** | ✅ shipped — Usage pipeline: `harvester` consuming `METERING` into ClickHouse; budget ledger + gateway `402` enforcement via `BUDGETS` KV — see [docs/design-usage.md](docs/design-usage.md) |
 | **M5** | Hardening: admission control from queue depth, request logging/metrics, docs |
 | **v1.5** | Priority tiers, claim-check for large payloads |
 | **v2** | Management console (see [the design mock](docs/design/console-mock)) |

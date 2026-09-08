@@ -24,6 +24,13 @@ services:
     image: clickhouse/clickhouse-server:24.8-alpine
     environment:
       CLICKHOUSE_DB: inferbus
+      # The image disables network access for the 'default' user unless a
+      # user/password pair is set, so the harvester (and the control
+      # plane's usage reader) need these to connect at all. Dev
+      # credentials, same posture as postgres above — change them for
+      # anything but a local stack.
+      CLICKHOUSE_USER: inferbus
+      CLICKHOUSE_PASSWORD: inferbus
     ports: ["8123:8123", "9000:9000"]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
@@ -34,10 +41,13 @@ services:
     build: { context: .., dockerfile: deploy/Dockerfile }
     command: ["gateway", "-config", "/etc/inferbus/gateway.yaml"]
     environment: { INFERBUS_NATS_URL: nats://nats:4222 }
-    volumes: ["./gateway.example.yaml:/etc/inferbus/gateway.yaml:ro"]
+    volumes: ["./gateway.kv.example.yaml:/etc/inferbus/gateway.yaml:ro"]
     ports: ["8080:8080"]
     depends_on:
       nats: { condition: service_healthy }
+      # The gateway ready-gates on its first KEYS/ALIASES scan, so it only
+      # needs the control plane to be on its way up, not healthy.
+      controlplane: { condition: service_started }
   worker:
     build: { context: .., dockerfile: deploy/Dockerfile }
     command: ["worker", "-config", "/etc/inferbus/worker.yaml"]
@@ -55,3 +65,18 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       nats: { condition: service_healthy }
+      # Only GET /admin/v1/usage needs ClickHouse; an unreachable one
+      # degrades that endpoint to 501 rather than stopping the control
+      # plane, so this dependency is convenience, not a requirement.
+      clickhouse: { condition: service_healthy }
+  harvester:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["harvester", "-config", "/etc/inferbus/harvester.yaml"]
+    environment:
+      INFERBUS_NATS_URL: nats://nats:4222
+      INFERBUS_CLICKHOUSE_DSN: clickhouse://inferbus:inferbus@clickhouse:9000/inferbus
+    volumes: ["./harvester.example.yaml:/etc/inferbus/harvester.yaml:ro"]
+    ports: ["8082:8082"]
+    depends_on:
+      nats: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
