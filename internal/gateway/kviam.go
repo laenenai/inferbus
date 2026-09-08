@@ -38,6 +38,11 @@ import (
 // a flat name->target map with nowhere to put them.
 type Resolution struct {
 	Target string
+	// Params is READ-ONLY for every caller. In kv mode this is the very
+	// map the ALIASES watcher published in its current snapshot, shared by
+	// every in-flight request that resolved this alias; writing to it
+	// would race them all. Callers that need to modify params must copy
+	// first.
 	Params map[string]string
 }
 

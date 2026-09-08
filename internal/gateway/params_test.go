@@ -116,3 +116,33 @@ func TestMergeParamsNonObjectBody(t *testing.T) {
 		t.Fatal("mergeParams on a non-object body: want error, got nil")
 	}
 }
+
+// TestMergeParamsReservedKeysAreCaseInsensitive guards a hang, not a style
+// rule: encoding/json matches field names case-insensitively and lets the
+// later duplicate win, so a body carrying "stream":false plus an
+// alias-injected "Stream":true decodes to stream=true in the worker. The
+// worker would then stream chunks while the gateway waited in resultOut for
+// a single result frame, and the request would hang until its deadline. An
+// exact-match reserved check let exactly that through.
+func TestMergeParamsReservedKeysAreCaseInsensitive(t *testing.T) {
+	body := []byte(`{"model":"real-target","stream":false,"input":"hi"}`)
+	for _, key := range []string{"Stream", "STREAM", "sTrEaM", "Model", "MODEL"} {
+		out, err := mergeParams(body, map[string]string{key: "true"})
+		if err != nil {
+			t.Fatalf("mergeParams with %q: %v", key, err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal result for %q: %v", key, err)
+		}
+		if _, present := got[key]; present {
+			t.Errorf("reserved key %q was injected into the body: %s", key, out)
+		}
+		if got["stream"] != false {
+			t.Errorf("param %q changed stream to %v (want false): %s", key, got["stream"], out)
+		}
+		if got["model"] != "real-target" {
+			t.Errorf("param %q changed model to %v: %s", key, got["model"], out)
+		}
+	}
+}

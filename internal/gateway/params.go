@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 )
 
 // reservedParams are the request-body keys an alias may never set. Both are
@@ -15,6 +16,15 @@ import (
 // from the transport the handler is committed to. The admin API rejects both
 // at write time in a later task; this skip is defense in depth for entries
 // that reached KV some other way (a hand-edited bucket, an older projector).
+//
+// Matching is CASE-INSENSITIVE, and that is load-bearing rather than
+// tidiness: encoding/json matches struct fields case-insensitively, and a
+// later duplicate key wins, so a body carrying both "stream":false and
+// "Stream":true decodes to stream=true. An alias param spelled "Stream"
+// would therefore slip past an exact-match check and flip the worker into
+// ChatStream while the gateway is already committed to resultOut — the
+// request would hang until its deadline. Keys here are lowercase; lookups
+// lowercase the candidate.
 var reservedParams = map[string]struct{}{
 	"model":  {},
 	"stream": {},
@@ -61,7 +71,7 @@ func mergeParams(body []byte, params map[string]string) ([]byte, error) {
 	}
 
 	for k, v := range params {
-		if _, reserved := reservedParams[k]; reserved {
+		if _, reserved := reservedParams[strings.ToLower(k)]; reserved {
 			slog.Warn("gateway: alias param ignored: reserved key", "key", k)
 			continue
 		}
