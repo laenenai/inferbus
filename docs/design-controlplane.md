@@ -51,8 +51,12 @@ Single es-lite workspace `controlplane`.
 Invariants enforced in `Decide`: an org's last owner cannot be removed; a
 project must belong to a live org; a key's org/project must exist at creation
 (checked via a read on the org aggregate before dispatch — cross-aggregate,
-best-effort, acceptable for admin-rate operations); alias targets are
-validated as NATS-subject-safe (`wire.Slug` identity).
+best-effort, acceptable for admin-rate operations); an alias target must be
+NATS-routable, i.e. have a non-empty `wire.Slug` — it is stored verbatim,
+since a concrete model name is whatever the serving engine calls it
+(`llama3.2:latest`) and `wire.ReqSubject`/`wire.Durable` slug it at the
+point of use. Alias *scopes* and *names*, unlike targets, are still required
+to be `wire.Slug`-identical: they compose stream ids and KV keys.
 
 **Privacy rule (hard):** events never contain PII or secrets. Members are
 opaque OIDC subjects (no emails; display names live only in read models

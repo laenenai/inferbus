@@ -11,17 +11,21 @@ import (
 	"github.com/laenenai/inferbus/internal/worker"
 )
 
-// TestDiscover covers the happy path: the engine's /v1/models endpoint
-// lists two models, and Discover turns that into a ready-to-run Config —
-// one openai_http ModelConfig per model, pointed at the engine URL, with
-// the caller's max-inflight applied to every model.
+// TestDiscover covers the happy path with the model ids real engines
+// actually report — Ollama's `name:tag` and vLLM's HuggingFace repo id —
+// neither of which is NATS-subject-safe as-is. Discover must keep the
+// engine's id VERBATIM as ModelConfig.Name (the subject layer,
+// wire.ReqSubject/wire.Durable, does the slugging), turning the listing
+// into a ready-to-run Config: one openai_http ModelConfig per model,
+// pointed at the engine URL, with the caller's max-inflight applied to
+// every model.
 func TestDiscover(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"llama3-2"},{"id":"qwen3"}]}`))
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"llama3.2:latest"},{"id":"meta-llama/Llama-3.2-1B-Instruct"}]}`))
 	}))
 	defer srv.Close()
 
@@ -32,7 +36,7 @@ func TestDiscover(t *testing.T) {
 	if len(cfg.Models) != 2 {
 		t.Fatalf("Models = %+v, want 2 entries", cfg.Models)
 	}
-	for i, wantName := range []string{"llama3-2", "qwen3"} {
+	for i, wantName := range []string{"llama3.2:latest", "meta-llama/Llama-3.2-1B-Instruct"} {
 		m := cfg.Models[i]
 		if m.Name != wantName {
 			t.Errorf("Models[%d].Name = %q, want %q", i, m.Name, wantName)
@@ -60,7 +64,7 @@ func TestDiscoverTrimsTrailingSlash(t *testing.T) {
 		if r.URL.Path != "/v1/models" {
 			t.Fatalf("request path = %q, want /v1/models (no double slash)", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"llama3-2"}]}`))
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"llama3.2:latest"}]}`))
 	}))
 	defer srv.Close()
 
@@ -76,13 +80,13 @@ func TestDiscoverTrimsTrailingSlash(t *testing.T) {
 	}
 }
 
-// TestDiscoverSkipsInvalidSlugs: a discovered model id that isn't already
-// NATS-subject-safe (wire.Slug would alter it) must be skipped rather than
-// fail the whole discovery — the remaining valid model should still come
-// through.
-func TestDiscoverSkipsInvalidSlugs(t *testing.T) {
+// TestDiscoverSkipsEmptySlug: an id made only of runes wire.Slug collapses
+// away slugs to "" and is genuinely unroutable (subject "inference.req.",
+// durable "model-"), so it must be skipped — but only it. A realistically
+// shaped id alongside it still comes through untouched.
+func TestDiscoverSkipsEmptySlug(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"good-model"},{"id":"Bad/Name:8b"}]}`))
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"qwen2.5-coder:7b"},{"id":"///"}]}`))
 	}))
 	defer srv.Close()
 
@@ -91,10 +95,52 @@ func TestDiscoverSkipsInvalidSlugs(t *testing.T) {
 		t.Fatalf("Discover: %v", err)
 	}
 	if len(cfg.Models) != 1 {
-		t.Fatalf("Models = %+v, want exactly 1 (invalid id skipped)", cfg.Models)
+		t.Fatalf("Models = %+v, want exactly 1 (empty-slug id skipped)", cfg.Models)
 	}
-	if cfg.Models[0].Name != "good-model" {
-		t.Errorf("Models[0].Name = %q, want good-model", cfg.Models[0].Name)
+	if cfg.Models[0].Name != "qwen2.5-coder:7b" {
+		t.Errorf("Models[0].Name = %q, want qwen2.5-coder:7b", cfg.Models[0].Name)
+	}
+}
+
+// TestDiscoverSkipsSlugCollision: two distinct ids that collapse to the
+// same subject token would silently cross-wire onto one durable consumer.
+// The first id (in the engine's own listing order) keeps the token; every
+// later claimant is skipped with a warning.
+func TestDiscoverSkipsSlugCollision(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"llama3.2"},{"id":"llama3:2"},{"id":"qwen3"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg, err := worker.Discover(context.Background(), srv.URL, 4)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(cfg.Models) != 2 {
+		t.Fatalf("Models = %+v, want exactly 2 (colliding id skipped)", cfg.Models)
+	}
+	if cfg.Models[0].Name != "llama3.2" {
+		t.Errorf("Models[0].Name = %q, want llama3.2 (first claimant of the token wins)", cfg.Models[0].Name)
+	}
+	if cfg.Models[1].Name != "qwen3" {
+		t.Errorf("Models[1].Name = %q, want qwen3", cfg.Models[1].Name)
+	}
+}
+
+// TestDiscoverAllUnroutable: if every id the engine reports slugs to "",
+// there is nothing usable to serve and that is still a hard error.
+func TestDiscoverAllUnroutable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"///"},{"id":"..."}]}`))
+	}))
+	defer srv.Close()
+
+	_, err := worker.Discover(context.Background(), srv.URL, 4)
+	if err == nil {
+		t.Fatal("Discover: want error when no id has a subject-safe form, got nil")
+	}
+	if !strings.Contains(err.Error(), "no usable models") {
+		t.Fatalf("err = %q, want it to contain %q", err.Error(), "no usable models")
 	}
 }
 

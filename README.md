@@ -134,13 +134,25 @@ inferbus worker -engine http://localhost:11434
 ```
 
 The worker calls `GET http://localhost:11434/v1/models` at startup, builds
-one `openai_http` model entry per id it returns (skipping any id that isn't
-NATS-subject-safe as-is, with a warning), and connects to
-`nats://127.0.0.1:4222` by default — override with `-nats`, and cap
-per-model concurrency with `-max-inflight` (default 4). There is no live
-reload: adding or removing models at the engine requires restarting the
-worker. This mode has no control plane, so it needs a gateway running in
-`iam.mode: static` (`deploy/gateway.example.yaml`) for keys/aliases.
+one `openai_http` model entry per id it returns — keeping each id **exactly
+as the engine reports it** (`llama3.2:latest`, `meta-llama/Llama-3.2-1B-Instruct`);
+NATS subject names are derived from the id, never the other way round — and
+connects to `nats://127.0.0.1:4222` by default. Override with `-nats`, and
+cap per-model concurrency with `-max-inflight` (default 4). Only two kinds
+of id are skipped, each with a warning: one with no subject-safe form at
+all (punctuation only), and one colliding with an earlier id on its derived
+subject (the first id listed keeps it). There is no live reload: adding or
+removing models at the engine requires restarting the worker. This mode has
+no control plane, so it needs a gateway running in `iam.mode: static`
+(`deploy/gateway.example.yaml`) for keys/aliases.
+
+Aliases gate reachability, so the alias a client calls must target the id
+exactly as the engine reports it:
+
+```yaml
+aliases:
+  fast: "llama3.2:latest"
+```
 
 For the full stack — gateway, worker, control plane, and harvester, wired
 together and ready for the budgets and control-plane walkthroughs below —

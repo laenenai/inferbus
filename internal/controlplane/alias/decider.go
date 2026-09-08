@@ -37,8 +37,19 @@ import (
 // StreamType is the es.StreamID.Type for every alias stream.
 const StreamType = "alias"
 
-// ErrInvalidTarget is returned by SetAlias when the target is not
-// NATS-subject-safe: spec §2 requires wire.Slug(target) == target.
+// ErrInvalidTarget is returned by SetAlias when the target has no
+// NATS-subject-safe form at all: wire.Slug(target) == "".
+//
+// The target is a CONCRETE model name, and concrete model names are
+// whatever the serving engine calls them — `llama3.2:latest` (Ollama),
+// `meta-llama/Llama-3.2-1B-Instruct` (vLLM). Those are stored verbatim:
+// the subject layer (wire.ReqSubject/wire.Durable) applies wire.Slug at
+// the point of use on both sides of the wire, so requiring
+// wire.Slug(target) == target here would make every real engine's models
+// unaliasable — and would contradict worker.Discover, which registers
+// engine ids exactly as reported. Only a target that slugs away to nothing
+// is rejected, because it would name the dangling subject
+// "inference.req." / durable "model-".
 var ErrInvalidTarget = errors.New("alias: invalid target")
 
 // StreamID composes a scope and alias name into the identifier other parts
@@ -75,12 +86,14 @@ var Decider = es.Decider[*controlplanev1.Alias, *controlplanev1.AliasCommand, *c
 
 		case *controlplanev1.AliasCommand_Set:
 			target := k.Set.GetTarget()
-			if target == "" || wire.Slug(target) != target {
-				// Reject empty explicitly: wire.Slug("") == "" would
-				// otherwise pass the slug check and create a live alias
+			if wire.Slug(target) == "" {
+				// Covers the empty target too, which must be rejected: a
+				// live alias with an empty target would be
 				// indistinguishable from "never set" under the delete
 				// no-op sentinel below (s.GetTarget() == ""), making it
-				// silently undeletable forever.
+				// silently undeletable forever. Because every accepted
+				// target has a non-empty slug, it is itself non-empty, so
+				// that sentinel stays sound.
 				return nil, nil, ErrInvalidTarget
 			}
 			// Upsert: unconditionally emits AliasSet, whether the stream

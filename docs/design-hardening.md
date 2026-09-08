@@ -62,12 +62,19 @@ and §6.2/§5's MODELS KV sketch to as-built shape.
 - Startup discovery: `GET <url>/v1/models` (OpenAI-compatible — Ollama,
   vLLM, llama.cpp all serve it); every returned model id becomes
   `ModelConfig{Name: id, Engine: "openai_http", URL: <url>,
-  MaxInflight: N (default 4)}`. Model ids that fail `wire.Slug`
-  validation are skipped with a warning (subject safety).
+  MaxInflight: N (default 4)}` — the id kept **verbatim**, exactly as the
+  engine reports it (`llama3.2:latest`, `meta-llama/Llama-3.2-1B-Instruct`).
+  Subject safety is the subject layer's job, not discovery's:
+  `wire.ReqSubject`/`wire.Durable` apply `wire.Slug` at the point of use on
+  both sides of the wire. Two ids are skipped with a warning: one whose
+  slug is empty (unroutable), and one colliding on its slug with an
+  earlier id in the same listing (first claimant wins, input order).
 - Discovery failure or zero usable models: fatal at startup with a clear
   error. Discovery runs once; restart to pick up engine changes.
 - Aliases still gate what clients may call — a zero-config worker
-  serving `llama3-2` is unreachable until an alias targets it.
+  serving `llama3.2:latest` is unreachable until an alias targets that
+  exact name. Alias targets are therefore validated as "has a non-empty
+  slug", not "is its own slug".
 
 ## 5. Workers listing (controlplane)
 

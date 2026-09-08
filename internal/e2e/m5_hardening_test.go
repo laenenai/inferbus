@@ -455,7 +455,7 @@ func TestM5ZeroConfigWorker(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"object": "list",
-				"data":   []map[string]string{{"id": "zc-1", "object": "model"}},
+				"data":   []map[string]string{{"id": "zc-test:latest", "object": "model"}},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -475,8 +475,8 @@ func TestM5ZeroConfigWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("worker.Discover: %v", err)
 	}
-	if len(cfg.Models) != 1 || cfg.Models[0].Name != "zc-1" {
-		t.Fatalf("Discover models = %+v, want exactly [zc-1]", cfg.Models)
+	if len(cfg.Models) != 1 || cfg.Models[0].Name != "zc-test:latest" {
+		t.Fatalf("Discover models = %+v, want exactly [zc-test:latest]", cfg.Models)
 	}
 	// Task 2's test-only knobs: fast MODELS heartbeat/TTL so this test
 	// doesn't wait out the 15s/45s production defaults (wire.go's
@@ -492,7 +492,8 @@ func TestM5ZeroConfigWorker(t *testing.T) {
 	w := worker.New(nc, js, engines, cfg)
 	stopWorker := startWorker(t, w)
 
-	// MODELS KV entry appears (poll <= 5s), advertising zc-1.
+	// MODELS KV entry appears (poll <= 5s), advertising the engine's own
+	// id verbatim.
 	pollUntil(t, 5*time.Second, func() bool {
 		kv, err := js.KeyValue(ctx, wire.BucketModels)
 		if err != nil {
@@ -507,19 +508,22 @@ func TestM5ZeroConfigWorker(t *testing.T) {
 			return false
 		}
 		for _, m := range ad.Models {
-			if m.Name == "zc-1" {
+			if m.Name == "zc-test:latest" {
 				return true
 			}
 		}
 		return false
 	})
 
-	// A chat through the gateway (alias -> zc-1) succeeds.
+	// A chat through the gateway (alias "fast" -> "zc-test:latest") succeeds:
+	// the gateway publishes to wire.ReqSubject("zc-test:latest") and the
+	// worker's durable consumer filters on the same slug-derived subject,
+	// so a colon-bearing engine id round-trips end to end.
 	const key = "e2e-m5-zc-key"
 	gw := gateway.New(nc, js, gateway.Config{
 		RequestTimeout: 10 * time.Second,
 		Keys:           []gateway.KeyConfig{{Key: key, Name: "k1", Org: "acme", Project: "default", Allow: []string{"fast"}}},
-		Aliases:        map[string]string{"fast": "zc-1"},
+		Aliases:        map[string]string{"fast": "zc-test:latest"},
 	})
 	gwSrv := httptest.NewServer(gw.Routes())
 	t.Cleanup(gwSrv.Close)

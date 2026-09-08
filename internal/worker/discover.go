@@ -25,12 +25,24 @@ type modelsResponse struct {
 // discovered id gets one openai_http ModelConfig pointed back at engineURL,
 // with maxInflight applied uniformly.
 //
-// A discovered id is only usable if it is already NATS-subject-safe as-is
-// (wire.Slug(id) == id) — the worker later derives NATS subjects from the
-// model name via wire.Slug, so an id that sanitizing would alter is skipped
-// (with a slog.Warn) rather than silently served under a different name
-// than the engine reports. Discover fails if the engine returns no usable
-// models at all.
+// Model ids are kept EXACTLY as the engine reports them — `llama3.2:latest`
+// from Ollama, `meta-llama/Llama-3.2-1B-Instruct` from vLLM — because that
+// is the name a client's alias must target and the name the engine expects
+// back on /v1/chat/completions. Subject safety is not this layer's job:
+// wire.ReqSubject and wire.Durable each apply wire.Slug themselves, so a
+// dotted or slashed id routes end-to-end untouched.
+//
+// Only two ids are genuinely unusable, and both are skipped with a
+// slog.Warn rather than failing the whole discovery:
+//
+//   - an id whose slug is EMPTY (punctuation only), which would produce the
+//     dangling subject "inference.req." and durable "model-"; and
+//   - an id that COLLIDES on its slug with an earlier id in the same
+//     listing, which would silently cross-wire two models onto one durable
+//     consumer. The first claimant (in the engine's own listing order,
+//     which Discover preserves) wins.
+//
+// Discover fails if the engine returns no usable models at all.
 //
 // ctx governs both the HTTP round-trip and how long Discover is willing to
 // wait; callers should give it a bounded deadline (zero-config startup
@@ -61,11 +73,19 @@ func Discover(ctx context.Context, engineURL string, maxInflight int) (Config, e
 	}
 
 	var cfg Config
+	seen := make(map[string]string, len(parsed.Data)) // subject token -> first id that claimed it
 	for _, m := range parsed.Data {
-		if wire.Slug(m.ID) != m.ID {
-			slog.Warn("discover: skipping model id not NATS-subject-safe", "engine", engineURL, "id", m.ID)
+		s := wire.Slug(m.ID)
+		if s == "" {
+			slog.Warn("discover: skipping model id with no subject-safe form", "engine", engineURL, "id", m.ID)
 			continue
 		}
+		if prev, dup := seen[s]; dup {
+			slog.Warn("discover: skipping model id that collides on its NATS subject",
+				"engine", engineURL, "id", m.ID, "collides_with", prev, "subject_token", s)
+			continue
+		}
+		seen[s] = m.ID
 		cfg.Models = append(cfg.Models, ModelConfig{
 			Name:        m.ID,
 			Engine:      "openai_http",

@@ -281,8 +281,38 @@ func TestSetAliasEmptyTargetRejected(t *testing.T) {
 	}
 }
 
+// TestSetAliasRealEngineModelIDTarget: an alias must be able to target a
+// model id exactly as a real engine reports it — Ollama's `name:tag`, a
+// vLLM HuggingFace repo id — since that is what a zero-config worker
+// registers (worker.Discover) and what the engine expects back. None of
+// these is wire.Slug-identical to itself; the subject layer
+// (wire.ReqSubject/wire.Durable) slugs them at the point of use, so the
+// aggregate must store them verbatim rather than reject them.
+func TestSetAliasRealEngineModelIDTarget(t *testing.T) {
+	ctx := context.Background()
+	rt := newRuntime(t)
+	stream := sid(t, "acme-gpt-4")
+
+	for _, target := range []string{
+		"llama3.2:latest",
+		"qwen2.5-coder:7b",
+		"meta-llama/Llama-3.2-1B-Instruct",
+	} {
+		res, err := rt.Handle(ctx, stream, setCmd(target, nil), es.Meta{})
+		if err != nil {
+			t.Fatalf("set target %q: %v", target, err)
+		}
+		if len(res.Events) != 1 {
+			t.Fatalf("set target %q: %d events, want 1", target, len(res.Events))
+		}
+		if got := res.State.GetTarget(); got != target {
+			t.Fatalf("state target = %q, want %q verbatim (no slugging in the aggregate)", got, target)
+		}
+	}
+}
+
 // TestSetAliasInvalidTarget proves Decide rejects a SetAlias whose target
-// is not NATS-subject-safe (wire.Slug(target) != target) with
+// has no subject-safe form at all (wire.Slug(target) == "") with
 // ErrInvalidTarget, and that rejection produces zero events / no state
 // change.
 func TestSetAliasInvalidTarget(t *testing.T) {
@@ -290,7 +320,7 @@ func TestSetAliasInvalidTarget(t *testing.T) {
 	rt := newRuntime(t)
 	stream := sid(t, "acme-gpt-4")
 
-	if _, err := rt.Handle(ctx, stream, setCmd("Not A Valid Target!", nil), es.Meta{}); !errors.Is(err, alias.ErrInvalidTarget) {
+	if _, err := rt.Handle(ctx, stream, setCmd("///", nil), es.Meta{}); !errors.Is(err, alias.ErrInvalidTarget) {
 		t.Fatalf("set invalid target: got %v, want ErrInvalidTarget", err)
 	}
 
