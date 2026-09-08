@@ -3,8 +3,10 @@ package harvester
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -22,6 +24,19 @@ type CHSink struct {
 	conn driver.Conn
 }
 
+// errClickHouseDSN is the only thing a malformed clickhouse_dsn ever
+// produces: a fixed string that cannot carry the DSN's credentials into a
+// log (final review I8). Host/database are reported for reachability
+// failures instead, where the DSN did parse and there is nothing secret to
+// spill.
+var errClickHouseDSN = errors.New("harvester: invalid clickhouse_dsn: could not be parsed; check its syntax (the DSN is deliberately not echoed here — it may carry a password)")
+
+// chTarget renders the parsed DSN's host list for error messages. Only the
+// address is included — never Auth.Password (I8).
+func chTarget(opts *clickhouse.Options) string {
+	return strings.Join(opts.Addr, ",")
+}
+
 // NewCHSink connects to ClickHouse at dsn (e.g.
 // "clickhouse://host:9000/dbname") and applies the usage_events /
 // usage_hourly / usage_hourly_mv DDL idempotently (CREATE ... IF NOT
@@ -32,17 +47,24 @@ type CHSink struct {
 func NewCHSink(ctx context.Context, dsn string) (*CHSink, error) {
 	opts, err := clickhouse.ParseDSN(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("harvester: parse clickhouse dsn: %w", err)
+		// I8 (final review): never propagate ParseDSN's error, and never
+		// echo the DSN. ParseDSN fails with a *net/url.Error whose Error()
+		// reproduces the entire URL — userinfo included, since net/url does
+		// not redact passwords in error strings — and cmd/inferbus prints
+		// this straight to stdout, i.e. container logs and every log
+		// aggregator downstream of them. The operator has the DSN; they do
+		// not need it read back to them.
+		return nil, errClickHouseDSN
 	}
 
 	conn, err := clickhouse.Open(opts)
 	if err != nil {
-		return nil, fmt.Errorf("harvester: open clickhouse: %w", err)
+		return nil, fmt.Errorf("harvester: open clickhouse %s (database %q): %w", chTarget(opts), opts.Auth.Database, err)
 	}
 
 	if err := conn.Ping(ctx); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("harvester: ping clickhouse: %w", err)
+		return nil, fmt.Errorf("harvester: ping clickhouse %s (database %q): %w", chTarget(opts), opts.Auth.Database, err)
 	}
 
 	sink := &CHSink{conn: conn}

@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,9 +173,13 @@ func TestAdmin_Usage_NilReaderNotConfigured(t *testing.T) {
 
 // TestNewCHUsageReader_OrgUsage inserts a handful of usage_events rows via a
 // directly-constructed harvester.CHSink (same module, per the task brief's
-// allowance) and asserts CHUsageReader.OrgUsage reads back the
-// usage_hourly_mv rollup, grouped by model/alias/provider/status, for the
-// requested window.
+// allowance) and asserts CHUsageReader.OrgUsage reads them back grouped by
+// model/alias/provider/status for the requested window.
+//
+// One row is inserted twice, byte-identical, to reproduce the JetStream
+// redelivery final-review I1 is about (an Ack that failed after a
+// successful insert): reading usage_events FINAL must count it once. The
+// old usage_hourly read path counted it twice, permanently.
 //
 // Skips cleanly when CP_TEST_CH_DSN is unset, exactly like
 // internal/harvester's TestCHSink_InsertMonthToDateAndHourlyMV. CP_TEST_CH_DSN
@@ -234,9 +239,11 @@ func TestNewCHUsageReader_OrgUsage(t *testing.T) {
 	if err := sink.InsertBatch(ctx, rows); err != nil {
 		t.Fatalf("InsertBatch: %v", err)
 	}
+	// I1: redeliver u-1 as a second physical insert of the identical row.
+	if err := sink.InsertBatch(ctx, rows[:1]); err != nil {
+		t.Fatalf("InsertBatch (redelivery): %v", err)
+	}
 
-	// usage_hourly_mv is fed asynchronously by ClickHouse's materialized
-	// view machinery on insert; give it a moment, then poll.
 	reader, err := NewCHUsageReader(ctx, testDSN)
 	if err != nil {
 		t.Fatalf("NewCHUsageReader: %v", err)
@@ -273,7 +280,7 @@ func TestNewCHUsageReader_OrgUsage(t *testing.T) {
 		t.Fatalf("no prod/gpt-5/ok bucket in %+v", buckets)
 	}
 	if gotProd.Requests != 2 || gotProd.PromptTokens != 140 || gotProd.CompletionTokens != 70 {
-		t.Fatalf("prod bucket = %+v, want Requests=2 PromptTokens=140 CompletionTokens=70", gotProd)
+		t.Fatalf("prod bucket = %+v, want Requests=2 PromptTokens=140 CompletionTokens=70 (the redelivered u-1 must be deduplicated, not double-counted)", gotProd)
 	}
 	if gotStaging == nil {
 		t.Fatalf("no staging/gpt-5-mini/error bucket in %+v", buckets)
@@ -343,4 +350,74 @@ func chTestDatabase(t *testing.T, ctx context.Context, baseDSN string) (dsn stri
 		_ = admin.Close()
 	}
 	return dsn, cleanup
+}
+
+// TestNewCHUsageReader_MalformedDSNDoesNotLeakPassword is the regression
+// test for final-review I8: clickhouse.ParseDSN fails with a
+// *net/url.Error whose Error() reproduces the entire URL, userinfo
+// included (net/url does not redact passwords in error strings), and
+// cmd/inferbus prints this error straight to stdout — i.e. container logs
+// and every aggregator downstream. The returned error must never contain
+// the DSN or its password.
+func TestNewCHUsageReader_MalformedDSNDoesNotLeakPassword(t *testing.T) {
+	const password = "sup3rs3cret"
+	// A raw DEL control character makes ParseDSN's URL parse fail.
+	dsn := "clickhouse://admin:" + password + "@host\x7f:9000/inferbus"
+
+	_, err := NewCHUsageReader(context.Background(), dsn)
+	if err == nil {
+		t.Fatal("NewCHUsageReader with a malformed DSN: want error, got nil")
+	}
+	if strings.Contains(err.Error(), password) {
+		t.Fatalf("error leaks the clickhouse password: %v", err)
+	}
+	if strings.Contains(err.Error(), "clickhouse://") {
+		t.Fatalf("error echoes the DSN: %v", err)
+	}
+	if !strings.Contains(err.Error(), "clickhouse_dsn") {
+		t.Fatalf("error %v should still name the offending config key", err)
+	}
+}
+
+// TestNewUsageReader_UnreachableClickHouseDegradesToNil covers final-review
+// I9: an unreachable (or malformed) clickhouse_dsn must degrade GET
+// /admin/v1/usage to its documented 501 not_configured path, not abort
+// Runner.Run — which would take the relay, the KV projectors and the whole
+// admin API down with it, so an analytics dependency could stop key
+// management from starting.
+func TestNewUsageReader_UnreachableClickHouseDegradesToNil(t *testing.T) {
+	// Port 1 is reserved and refuses connections immediately.
+	if ur := newUsageReader(context.Background(), "clickhouse://127.0.0.1:1/inferbus"); ur != nil {
+		t.Fatalf("newUsageReader with an unreachable DSN = %v, want nil (degraded)", ur)
+	}
+	if ur := newUsageReader(context.Background(), "clickhouse://admin:pw@host\x7f:9000/db"); ur != nil {
+		t.Fatalf("newUsageReader with a malformed DSN = %v, want nil (degraded)", ur)
+	}
+	if ur := newUsageReader(context.Background(), ""); ur != nil {
+		t.Fatalf("newUsageReader with no DSN = %v, want nil", ur)
+	}
+}
+
+// TestOrgUsageSQL_ReadsDedupedEventsWithinBounds pins the query shape the
+// final review's I1 and I10 rulings require: reads come from usage_events
+// (the ReplacingMergeTree ledger of record, with FINAL) rather than the
+// usage_hourly SummingMergeTree rollup — which permanently double-counts a
+// redelivered event, since a materialized view is an INSERT trigger with no
+// dedup of its own — and every query carries a row LIMIT plus a
+// server-side execution-time cap.
+func TestOrgUsageSQL_ReadsDedupedEventsWithinBounds(t *testing.T) {
+	q := fmt.Sprintf(orgUsageSQL, usageWindowIntervals["7d"], usageQueryMaxRows, int(usageQueryTimeout/time.Second))
+	for _, want := range []string{
+		"FROM usage_events FINAL",
+		"toStartOfHour(now()) - INTERVAL 7 DAY",
+		"LIMIT 10000",
+		"max_execution_time = 10",
+	} {
+		if !strings.Contains(q, want) {
+			t.Errorf("orgUsageSQL missing %q:\n%s", want, q)
+		}
+	}
+	if strings.Contains(q, "usage_hourly") {
+		t.Errorf("orgUsageSQL still reads the double-counting rollup:\n%s", q)
+	}
 }

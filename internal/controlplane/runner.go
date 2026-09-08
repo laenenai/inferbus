@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -236,22 +237,17 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// usageReader is Task 8's optional ClickHouse-backed usage reader:
-	// nil (the default, when Config.ClickhouseDSN is empty) leaves GET
-	// /admin/v1/usage reporting 501 not_configured rather than failing
-	// the whole control plane over an optional dependency. When
-	// configured, its connection is closed on every exit path via defer
-	// — this happens after the shutdown sequence below (which fully
-	// stops HTTP/projectors/relay) since defers run in the reverse order
-	// they were registered, same as the pool.Close() above it.
-	var usageReader UsageReader
-	if r.cfg.ClickhouseDSN != "" {
-		ur, err := NewCHUsageReader(ctx, r.cfg.ClickhouseDSN)
-		if err != nil {
-			stopRelay()
-			return fmt.Errorf("controlplane: clickhouse usage reader: %w", err)
-		}
-		defer ur.Close()
-		usageReader = ur
+	// nil (when Config.ClickhouseDSN is empty, or — final review I9 —
+	// when ClickHouse is unreachable at boot) leaves GET /admin/v1/usage
+	// reporting 501 not_configured rather than failing the whole control
+	// plane over an optional dependency. When configured and reachable,
+	// its connection is closed on every exit path via defer — this
+	// happens after the shutdown sequence below (which fully stops
+	// HTTP/projectors/relay) since defers run in the reverse order they
+	// were registered, same as the pool.Close() above it.
+	usageReader := newUsageReader(ctx, r.cfg.ClickhouseDSN)
+	if c, ok := usageReader.(io.Closer); ok {
+		defer c.Close()
 	}
 
 	orgRT := aggregate.NewRuntime(r.store, org.Decider, org.Codec())
@@ -318,7 +314,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	})
 
-	srv := &http.Server{Addr: r.cfg.Addr, Handler: mux}
+	// I10: a ReadHeaderTimeout so a client cannot pin a connection open
+	// indefinitely mid-request-line. No WriteTimeout: resyncProjections can
+	// legitimately hold a response open for its own (longer) timeout.
+	srv := &http.Server{Addr: r.cfg.Addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- srv.ListenAndServe() }()
 

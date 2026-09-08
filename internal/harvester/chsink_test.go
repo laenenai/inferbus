@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,4 +175,34 @@ func withDatabase(dsn, name string) (string, error) {
 	}
 	u.Path = "/" + name
 	return u.String(), nil
+}
+
+// TestNewCHSink_MalformedDSNDoesNotLeakPassword is the regression test for
+// final-review I8: clickhouse.ParseDSN fails with a *net/url.Error whose
+// Error() reproduces the entire URL, userinfo included (net/url does not
+// redact passwords in error strings), and cmd/inferbus prints this error
+// straight to stdout — i.e. container logs and every aggregator downstream
+// of them. A fat-fingered clickhouse_dsn must never put the ClickHouse
+// password in a log.
+func TestNewCHSink_MalformedDSNDoesNotLeakPassword(t *testing.T) {
+	const password = "sup3rs3cret"
+	// A raw DEL control character makes ParseDSN's URL parse fail.
+	dsn := "clickhouse://admin:" + password + "@host\x7f:9000/inferbus"
+
+	// Sanity: the driver's own error really does contain the password, so
+	// this test would fail if the wrapping ever regressed to %w.
+	if _, err := clickhouse.ParseDSN(dsn); err == nil || !strings.Contains(err.Error(), password) {
+		t.Fatalf("fixture no longer reproduces the leak (ParseDSN err = %v)", err)
+	}
+
+	_, err := NewCHSink(context.Background(), dsn)
+	if err == nil {
+		t.Fatal("NewCHSink with a malformed DSN: want error, got nil")
+	}
+	if strings.Contains(err.Error(), password) {
+		t.Fatalf("error leaks the clickhouse password: %v", err)
+	}
+	if strings.Contains(err.Error(), "admin:") || strings.Contains(err.Error(), "clickhouse://") {
+		t.Fatalf("error echoes the DSN: %v", err)
+	}
 }
