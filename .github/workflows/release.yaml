@@ -25,10 +25,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Create GitHub release
+      # Idempotent: `gh release create` fails with "a release with the same
+      # tag name already exists", and because `build` needs this job, that
+      # failure would block a re-run from ever reaching the binaries — the
+      # exact recovery path a flaky matrix leg or a transient upload error
+      # calls for. Creating only when the release is absent makes
+      # "Re-run failed jobs" work. Uploads below are already --clobber, so
+      # the whole workflow is safe to re-run end to end.
+      - name: Create GitHub release if absent
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --generate-notes
 
   build:
     needs: create-release
