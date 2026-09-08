@@ -3,6 +3,7 @@ package harvester_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -600,4 +601,105 @@ func TestBudgetLedger_PreM4EntryGainsIdOnLimitsChange(t *testing.T) {
 		e, ok := getBudgetEntry(t, js, "key-legacy")
 		return ok && e.Budget == 100000 && e.Month == "2026-09" && !e.Exceeded
 	})
+}
+
+// blockingSink is a Sink whose MonthToDate blocks until its context expires
+// for every key except the ones named in fast. It records the maximum
+// number of MonthToDate calls that were ever in flight at once.
+type blockingSink struct {
+	fast map[string]bool
+
+	mu       sync.Mutex
+	inflight int
+	maxSeen  int
+}
+
+func (s *blockingSink) InsertBatch(context.Context, []harvester.Row) error { return nil }
+
+func (s *blockingSink) Close() error { return nil }
+
+func (s *blockingSink) MonthToDate(ctx context.Context, keyID, _ string) (int64, error) {
+	s.mu.Lock()
+	s.inflight++
+	if s.inflight > s.maxSeen {
+		s.maxSeen = s.inflight
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.inflight--
+		s.mu.Unlock()
+	}()
+
+	s.mu.Lock()
+	ok := s.fast[keyID]
+	s.mu.Unlock()
+	if ok {
+		return 0, nil
+	}
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func (s *blockingSink) allowFast(keyID string) {
+	s.mu.Lock()
+	s.fast[keyID] = true
+	s.mu.Unlock()
+}
+
+func (s *blockingSink) maxInflight() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxSeen
+}
+
+// TestBudgetLedger_WedgedSinkDoesNotFreezeBudgetPublishing is the
+// regression test for final-review I3. With many budgeted keys and a sink
+// that never answers MonthToDate, the old flush tick spent
+// len(pending) × budgetOpTimeout serially on Run's goroutine and never
+// reached its flushOne loop — so a key that had already been baselined and
+// then crossed its budget via AddUsage was never published, i.e. budget
+// enforcement froze at its last published state for the entire outage.
+//
+// The ledger must now (a) keep publishing dirty entries regardless of sink
+// health, and (b) never run more than budgetBaselineConcurrency (8)
+// MonthToDate calls at a time.
+func TestBudgetLedger_WedgedSinkDoesNotFreezeBudgetPublishing(t *testing.T) {
+	_, js := testutil.RunNATS(t)
+	keysKV := createKeysBucket(t, js)
+
+	sink := &blockingSink{fast: map[string]bool{"key-live": true}}
+	putKeyEntry(t, keysKV, cpkv.HashKey("plaintext-live"), cpkv.KeyEntry{Id: "key-live", MonthlyTokenBudget: 1000})
+
+	l := harvester.NewBudgetLedger(js, sink, 100*time.Millisecond)
+	l.SetNowFn(func() time.Time { return time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC) })
+	startBudgetLedger(t, l)
+
+	// key-live baselines normally and gets published.
+	pollUntil(t, 10*time.Second, func() bool {
+		e, ok := getBudgetEntry(t, js, "key-live")
+		return ok && e.Budget == 1000 && !e.Exceeded
+	})
+
+	// Now ClickHouse goes away for everything else: 40 more budgeted keys
+	// appear whose baselines will never answer.
+	for i := range 40 {
+		id := fmt.Sprintf("key-wedged-%02d", i)
+		putKeyEntry(t, keysKV, cpkv.HashKey("plaintext-"+id), cpkv.KeyEntry{Id: id, MonthlyTokenBudget: 1000})
+	}
+
+	// key-live crosses its budget. Its BUDGETS entry must still flip
+	// exceeded promptly — it must not queue behind 40 wedged baselines.
+	l.AddUsage(harvester.Row{KeyID: "key-live", PromptTokens: 900, CompletionTokens: 200})
+	pollUntil(t, 10*time.Second, func() bool {
+		e, ok := getBudgetEntry(t, js, "key-live")
+		return ok && e.Exceeded && e.Used == 1100
+	})
+
+	if got := sink.maxInflight(); got > 8 {
+		t.Fatalf("max concurrent MonthToDate calls = %d, want <= 8 (bounded pool)", got)
+	}
+	if got := sink.maxInflight(); got < 2 {
+		t.Fatalf("max concurrent MonthToDate calls = %d, want the baseline pass to actually run concurrently", got)
+	}
 }

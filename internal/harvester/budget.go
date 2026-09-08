@@ -40,11 +40,18 @@
 //
 // Watcher purity (I4): the KEYS watch goroutine (watchKeys and everything
 // it calls — consumeKeys, applyKeysSnapshot, reconcileKeys) never performs
-// Sink or KV I/O. It only ever mutates the in-memory ledger under mu; every
-// actual MonthToDate/Put/Delete call happens on Run's own goroutine
-// (flushTick's pending-baseline retry, checkMonthRollover, rebaselineAll,
-// and flushOne), so a wedged sink or KV store can never stall live KEYS
-// delivery.
+// Sink or KV I/O. It only ever mutates the in-memory ledger under mu, so a
+// wedged sink or KV store can never stall live KEYS delivery.
+//
+// Goroutine layout after the final review's I3 fix: every BUDGETS KV
+// Put/Delete (flushOne) still happens on Run's own goroutine and nowhere
+// else — that is what lets l.kv stay mutex-free. Sink.MonthToDate calls,
+// by contrast, now run on a bounded pool (loadBaselines,
+// budgetBaselineConcurrency workers, each call bounded by
+// budgetBaselineTimeout) and month rollover runs on its own ticker
+// goroutine, so neither a slow nor a dead ClickHouse can stall the flush
+// loop's publishing or delay a rollover. loadBaseline mutates only ledger
+// rows under mu, which is safe from any goroutine.
 package harvester
 
 import (
@@ -67,6 +74,23 @@ import (
 // tick indefinitely instead of surfacing as an ordinary log-and-retry-next-
 // tick failure (binding ruling #2).
 const budgetOpTimeout = 10 * time.Second
+
+// Baseline-fetch bounds (final review I3). The pending/re-baseline/rollover
+// passes used to call Sink.MonthToDate serially, one key at a time, each
+// bounded only by budgetOpTimeout — so with an unreachable ClickHouse and N
+// budgeted keys a single flush tick burned N × 10s on Run's goroutine and
+// never reached its flushOne loop, freezing BUDGETS publishing (and month
+// rollover) for the whole outage. Now: at most
+// budgetBaselineConcurrency fetches run at once, each bounded by
+// budgetBaselineTimeout, a failing key is simply skipped until the next
+// tick (logged, rate-limited, by loadBaseline), the dirty-entry flush runs
+// BEFORE the baseline pass so publishing can never queue behind a sick
+// sink, and month rollover runs on its own goroutine/ticker so it is not
+// behind either.
+const (
+	budgetBaselineConcurrency = 8
+	budgetBaselineTimeout     = 5 * time.Second
+)
 
 // defaultRebaselineInterval is how often rebaselineAll re-queries
 // Sink.MonthToDate for every already-loaded budgeted row (I2/I3), absent an
@@ -236,6 +260,27 @@ func (l *BudgetLedger) Run(ctx context.Context) error {
 		l.watchKeys(ctx)
 	}()
 
+	// I3: month rollover gets its own goroutine and ticker so a slow or
+	// unreachable sink stalling the flush loop's baseline pass can never
+	// delay a rollover (checkMonthRollover only mutates ledger rows under
+	// mu and fetches baselines, which is safe off Run's goroutine — it
+	// never touches l.kv, which stays Run-goroutine-only).
+	rolloverDone := make(chan struct{})
+	go func() {
+		defer close(rolloverDone)
+		ticker := time.NewTicker(l.refresh)
+		defer ticker.Stop()
+		l.checkMonthRollover() // establish the starting month immediately
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				l.checkMonthRollover()
+			}
+		}
+	}()
+
 	flushTicker := time.NewTicker(l.refresh)
 	defer flushTicker.Stop()
 
@@ -246,6 +291,7 @@ func (l *BudgetLedger) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			<-watchDone
+			<-rolloverDone
 			return ctx.Err()
 		case <-flushTicker.C:
 			l.flushTick()
@@ -631,7 +677,10 @@ func (l *BudgetLedger) reconcileKeys(folded map[string]*keyFold) {
 // Callers must hold l.mu.
 func (l *BudgetLedger) currentMonthLocked() string {
 	if l.month == "" {
-		l.month = l.nowFn().Format("2006-01")
+		// M8: UTC, because Sink.MonthToDate buckets by toYYYYMM over a
+		// DateTime64(3, 'UTC') column — a local-time month string would
+		// roll over up to ~14h out of step with the sink's own boundary.
+		l.month = l.nowFn().UTC().Format("2006-01")
 	}
 	return l.month
 }
@@ -662,9 +711,11 @@ func (l *BudgetLedger) currentMonthLocked() string {
 // already true), so flushTick's pending-baseline retry picks it up again
 // next tick — binding ruling #2: log + retry next tick, never fail-stop.
 //
-// I4: this performs Sink I/O and must only ever be called from Run's own
-// goroutine (flushTick's pending-retry loop, checkMonthRollover, or
-// rebaselineAll) — never from the KEYS watch goroutine.
+// I4: this performs Sink I/O and must never be called from the KEYS watch
+// goroutine. It is always reached via loadBaselines' bounded worker pool
+// (from flushTick's pending-retry pass, rebaselineAll, or
+// checkMonthRollover's own ticker goroutine); it touches only ledger rows
+// under mu, never l.kv, so running it off Run's goroutine is safe.
 func (l *BudgetLedger) loadBaseline(id string, forceDirty bool) {
 	l.mu.Lock()
 	row, ok := l.entries[id]
@@ -675,7 +726,10 @@ func (l *BudgetLedger) loadBaseline(id string, forceDirty bool) {
 	month := row.month
 	l.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(l.runCtx, budgetOpTimeout)
+	// I3: bounded by budgetBaselineTimeout (not budgetOpTimeout) — one sick
+	// key costs at most this long, and loadBaselines runs several of these
+	// concurrently.
+	ctx, cancel := context.WithTimeout(l.runCtx, budgetBaselineTimeout)
 	defer cancel()
 	used, err := l.sink.MonthToDate(ctx, id, month)
 	if err != nil {
@@ -719,17 +773,53 @@ func (l *BudgetLedger) rebaselineAll() {
 	}
 	l.mu.Unlock()
 
-	for _, id := range ids {
-		l.loadBaseline(id, false)
+	l.loadBaselines(ids, false)
+}
+
+// loadBaselines fetches baselines for ids through a bounded worker pool
+// (budgetBaselineConcurrency), each call bounded by budgetBaselineTimeout
+// inside loadBaseline. It replaces the serial loops that made a slow or
+// unreachable sink cost len(ids) × timeout on a single goroutine (final
+// review I3); a key whose fetch fails is skipped for this pass and retried
+// on the next tick, exactly as before.
+func (l *BudgetLedger) loadBaselines(ids []string, forceDirty bool) {
+	if len(ids) == 0 {
+		return
 	}
+	workers := min(budgetBaselineConcurrency, len(ids))
+	work := make(chan string)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for id := range work {
+				l.loadBaseline(id, forceDirty)
+			}
+		}()
+	}
+	for _, id := range ids {
+		work <- id
+	}
+	close(work)
+	wg.Wait()
 }
 
 // flushTick is called once per refresh interval from Run's select loop. It
-// checks for month rollover, retries any baseline fetch that failed (or
-// hasn't happened yet), and flushes every dirty entry to BUDGETS.
+// flushes every dirty entry to BUDGETS and then retries any baseline fetch
+// that failed (or hasn't happened yet).
+//
+// I3: the flush pass runs FIRST, and the baseline pass is bounded
+// (loadBaselines). Previously the serial baseline pass ran first, so a
+// ClickHouse outage with many budgeted keys meant flushOne was never
+// reached at all — an already-baselined key that crossed its budget via
+// AddUsage was never published, i.e. budget enforcement froze at its last
+// published state for the whole outage. Flushing first costs a newly
+// baselined row one extra tick before its first publish, which is well
+// inside the advisory-throttle tolerance; freezing publication is not.
+// Month rollover is checked on its own ticker (see Run) for the same
+// reason.
 func (l *BudgetLedger) flushTick() {
-	l.checkMonthRollover()
-
 	l.mu.Lock()
 	var pending []string
 	for id, row := range l.entries {
@@ -743,12 +833,10 @@ func (l *BudgetLedger) flushTick() {
 	}
 	l.mu.Unlock()
 
-	for _, id := range pending {
-		l.loadBaseline(id, true)
-	}
 	for _, id := range dirtyIDs {
 		l.flushOne(id)
 	}
+	l.loadBaselines(pending, true)
 }
 
 // checkMonthRollover compares the wall-clock month (via nowFn) against the
@@ -760,7 +848,7 @@ func (l *BudgetLedger) flushTick() {
 // paragraph — so the stale month's entry stays untouched in BUDGETS in the
 // meantime).
 func (l *BudgetLedger) checkMonthRollover() {
-	newMonth := l.now().Format("2006-01")
+	newMonth := l.now().UTC().Format("2006-01") // M8: UTC — see currentMonthLocked.
 
 	l.mu.Lock()
 	if l.month == "" {
@@ -786,9 +874,7 @@ func (l *BudgetLedger) checkMonthRollover() {
 	}
 	l.mu.Unlock()
 
-	for _, id := range ids {
-		l.loadBaseline(id, true)
-	}
+	l.loadBaselines(ids, true)
 }
 
 // flushOne resolves one dirty key id: either deleting its BUDGETS entry (if
