@@ -104,6 +104,7 @@ func (w *Worker) RunReady(ctx context.Context, ready chan<- struct{}) error {
 		}
 		consumers = append(consumers, cc)
 	}
+	go w.advertise(ctx)
 	if ready != nil {
 		close(ready)
 	}
