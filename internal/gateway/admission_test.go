@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/laenenai/inferbus/internal/relay"
@@ -156,6 +158,81 @@ func TestAdmissionMissingConsumerAllows(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests {
 		t.Fatalf("status = 429 with no consumer for the model")
+	}
+}
+
+// TestAdmissionFetchOneRoundTripPerReading: every backlog reading must cost
+// exactly ONE $JS.API.CONSUMER.INFO round trip. js.Consumer() already
+// fetches consumer info to build the handle, so re-resolving the handle on
+// every fetch and then calling Info() on it spent two RPCs for one reading
+// — both against the same 500 ms admissionFetchTimeout budget, making a
+// degraded JetStream twice as likely to blow the deadline. Counted directly
+// off the wire: a plain NATS subscription on the API subject sees every
+// request the client sends.
+func TestAdmissionFetchOneRoundTripPerReading(t *testing.T) {
+	nc, js := testutil.RunNATS(t)
+	if err := wire.EnsureStreams(context.Background(), js); err != nil {
+		t.Fatalf("ensure streams: %v", err)
+	}
+	ensureDurable(t, js, "m1")
+
+	var mu sync.Mutex
+	infoRequests := 0
+	sub, err := nc.Subscribe("$JS.API.CONSUMER.INFO."+wire.StreamInference+"."+wire.Durable("m1"), func(*nats.Msg) {
+		mu.Lock()
+		infoRequests++
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	a := newAdmissionChecker(js, AdmissionConfig{MaxBacklog: 100})
+	const readings = 3
+	for i := 0; i < readings; i++ {
+		if _, err := a.fetchBacklog(context.Background(), "m1"); err != nil {
+			t.Fatalf("fetchBacklog #%d: %v", i, err)
+		}
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	mu.Lock()
+	got := infoRequests
+	mu.Unlock()
+	if got != readings {
+		t.Fatalf("CONSUMER.INFO requests = %d for %d backlog readings, want %d (one round trip each)", got, readings, readings)
+	}
+}
+
+// TestAdmissionFetchRecoversFromDeletedConsumer: a cached consumer handle
+// must not outlive the consumer it names. Deleting the durable makes the
+// next reading fail (which admits, per allow's fail-open contract), and a
+// recreated durable must be readable again rather than wedged behind a dead
+// handle.
+func TestAdmissionFetchRecoversFromDeletedConsumer(t *testing.T) {
+	_, js := testutil.RunNATS(t)
+	ctx := context.Background()
+	if err := wire.EnsureStreams(ctx, js); err != nil {
+		t.Fatalf("ensure streams: %v", err)
+	}
+	ensureDurable(t, js, "m1")
+
+	a := newAdmissionChecker(js, AdmissionConfig{MaxBacklog: 100})
+	if _, err := a.fetchBacklog(ctx, "m1"); err != nil {
+		t.Fatalf("first fetchBacklog: %v", err)
+	}
+	if err := js.DeleteConsumer(ctx, wire.StreamInference, wire.Durable("m1")); err != nil {
+		t.Fatalf("delete consumer: %v", err)
+	}
+	if _, err := a.fetchBacklog(ctx, "m1"); err == nil {
+		t.Fatal("fetchBacklog after consumer delete: want error, got nil")
+	}
+	ensureDurable(t, js, "m1")
+	if _, err := a.fetchBacklog(ctx, "m1"); err != nil {
+		t.Fatalf("fetchBacklog after consumer recreated: %v", err)
 	}
 }
 

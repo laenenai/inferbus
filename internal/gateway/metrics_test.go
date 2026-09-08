@@ -115,3 +115,66 @@ func TestInflightGaugeExposed(t *testing.T) {
 		t.Fatalf("metrics body missing inferbus_inflight_requests:\n%s", body)
 	}
 }
+
+// TestStatusRecorderUnwrap: statusRecorder must be transparent to the
+// net/http machinery that reaches the real ResponseWriter by unwrapping —
+// http.NewResponseController (and, via the same unexported interface probe,
+// http.MaxBytesReader's connection-close signal). Without Unwrap, the
+// controller cannot find a Flusher and SSE through this middleware would
+// silently stop flushing the day the handler switches to it.
+func TestStatusRecorderUnwrap(t *testing.T) {
+	nc, js := testutil.RunNATS(t)
+	g := New(nc, js, Config{})
+
+	var flushErr error
+	h := g.withRequestMetrics("chat", func(w http.ResponseWriter, r *http.Request) {
+		if rec, ok := w.(*statusRecorder); !ok {
+			t.Errorf("handler saw %T, want *statusRecorder", w)
+		} else if rec.Unwrap() != rec.ResponseWriter {
+			t.Errorf("Unwrap() did not return the wrapped ResponseWriter")
+		}
+		w.WriteHeader(http.StatusOK)
+		flushErr = http.NewResponseController(w).Flush()
+	})
+
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if flushErr != nil {
+		t.Fatalf("ResponseController.Flush through statusRecorder: %v, want nil", flushErr)
+	}
+}
+
+// TestRequestMetricsCountsPanickingHandler: inferbus_requests_total's
+// contract is "exactly once per response". A handler that panics unwinds
+// past a non-deferred Inc, so the request would never be counted even though
+// net/http's per-connection recover still emits a 500. Defer makes the
+// contract true.
+func TestRequestMetricsCountsPanickingHandler(t *testing.T) {
+	nc, js := testutil.RunNATS(t)
+	g := New(nc, js, Config{})
+
+	h := g.withRequestMetrics("chat", func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	})
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("handler panic did not propagate; the middleware must not swallow it")
+			}
+		}()
+		h(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+	}()
+
+	srv := httptest.NewServer(g.Routes())
+	t.Cleanup(srv.Close)
+	body := scrapeMetrics(t, srv)
+	if !strings.Contains(body, `inferbus_requests_total{code="200",route="chat"} 1`) {
+		t.Fatalf("panicking request was not counted; /metrics body:\n%s", body)
+	}
+}

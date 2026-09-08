@@ -108,6 +108,14 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
+// Unwrap exposes the wrapped ResponseWriter to the net/http machinery that
+// reaches the real writer by unwrapping rather than by type assertion:
+// http.NewResponseController, and http.MaxBytesReader's probe for the
+// unexported requestTooLarge() interface that tells the server to close the
+// connection after an oversized body (gateway.go's 1 MiB body limit).
+// Without it those probes stop at this wrapper and silently no-op.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // withRequestMetrics wraps h so every response increments
 // inferbus_requests_total{route=route, code=<final status>} exactly once,
 // regardless of which of a handler's many write sites (oaiError,
@@ -118,8 +126,14 @@ func (r *statusRecorder) Flush() {
 func (g *Gateway) withRequestMetrics(route string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		// Deferred so a panicking handler is still counted: net/http's
+		// per-connection recover turns it into a 500 the client sees, and a
+		// counter documented as "exactly once per response" must not have a
+		// hole exactly where things went most wrong.
+		defer func() {
+			g.metrics.requests.WithLabelValues(route, strconv.Itoa(rec.status)).Inc()
+		}()
 		h(rec, r)
-		g.metrics.requests.WithLabelValues(route, strconv.Itoa(rec.status)).Inc()
 	}
 }
 

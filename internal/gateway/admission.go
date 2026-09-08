@@ -54,14 +54,19 @@ type admissionChecker struct {
 
 	mu    sync.Mutex
 	cache map[string]admissionEntry
+	// consumers memoizes the jetstream.Consumer handle per model. Resolving
+	// a handle costs a CONSUMER.INFO round trip, so re-resolving it on every
+	// reading doubled the RPCs — see fetchBacklog.
+	consumers map[string]jetstream.Consumer
 }
 
 func newAdmissionChecker(js jetstream.JetStream, cfg AdmissionConfig) *admissionChecker {
 	a := &admissionChecker{
-		js:    js,
-		cfg:   cfg,
-		nowFn: time.Now,
-		cache: make(map[string]admissionEntry),
+		js:        js,
+		cfg:       cfg,
+		nowFn:     time.Now,
+		cache:     make(map[string]admissionEntry),
+		consumers: make(map[string]jetstream.Consumer),
 	}
 	a.fetchFn = a.fetchBacklog
 	return a
@@ -140,14 +145,62 @@ func (a *admissionChecker) store(model string, backlog uint64) {
 // not yet delivered plus messages delivered but not yet acked, i.e. the
 // work already committed to this model that no new request can jump ahead
 // of.
+//
+// Exactly one $JS.API.CONSUMER.INFO round trip per reading. js.Consumer()
+// fetches consumer info to build its handle, so on the first reading for a
+// model the handle's CachedInfo() is that same response and costs nothing
+// extra; the handle is then memoized and every later reading refreshes it
+// with a single Info(). This matters because both the resolve and the
+// refresh shared one 500 ms admissionFetchTimeout budget — spending two
+// RPCs made a degraded JetStream twice as likely to blow the deadline (which
+// fails open, i.e. a longer window of un-throttled admits).
+//
+// A handle is dropped whenever Info fails, so a consumer that is deleted and
+// recreated (a worker restart that rebuilds its durable) is picked up on the
+// next reading rather than wedging behind a stale handle.
 func (a *admissionChecker) fetchBacklog(ctx context.Context, model string) (uint64, error) {
+	if cons := a.consumerHandle(model); cons != nil {
+		info, err := cons.Info(ctx)
+		if err != nil {
+			a.forgetConsumer(model)
+			return 0, err
+		}
+		return backlogOf(info), nil
+	}
 	cons, err := a.js.Consumer(ctx, wire.StreamInference, wire.Durable(model))
 	if err != nil {
 		return 0, err
 	}
-	info, err := cons.Info(ctx)
-	if err != nil {
-		return 0, err
+	info := cons.CachedInfo()
+	if info == nil {
+		// Defensive: nats.go always populates the handle's info from the
+		// call above, but a nil here must not panic — pay the extra RPC.
+		if info, err = cons.Info(ctx); err != nil {
+			return 0, err
+		}
 	}
-	return info.NumPending + uint64(info.NumAckPending), nil
+	a.rememberConsumer(model, cons)
+	return backlogOf(info), nil
+}
+
+func backlogOf(info *jetstream.ConsumerInfo) uint64 {
+	return info.NumPending + uint64(info.NumAckPending)
+}
+
+func (a *admissionChecker) consumerHandle(model string) jetstream.Consumer {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.consumers[model]
+}
+
+func (a *admissionChecker) rememberConsumer(model string, cons jetstream.Consumer) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.consumers[model] = cons
+}
+
+func (a *admissionChecker) forgetConsumer(model string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.consumers, model)
 }
