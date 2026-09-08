@@ -30,6 +30,16 @@ type Config struct {
 	// settable cross-package for e2e tests that need faster timing.
 	AdvertiseEvery time.Duration `yaml:"-"`
 	AdvertiseTTL   time.Duration `yaml:"-"`
+
+	// AckWait/ConsumerMaxDeliver override the INFERENCE consumer's
+	// AckWait (default 30s) and MaxDeliver (default 2) — see RunReady's
+	// CreateOrUpdateConsumer call. Same shape and rationale as
+	// AdvertiseEvery/AdvertiseTTL above: test-only knobs, never loaded
+	// from YAML, kept settable cross-package so an e2e redelivery test
+	// doesn't have to wait out the full 30s production AckWait to observe
+	// a real redelivery.
+	AckWait            time.Duration `yaml:"-"`
+	ConsumerMaxDeliver int           `yaml:"-"`
 }
 
 // Defaults fills in zero-valued fields that must never be empty at

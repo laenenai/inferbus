@@ -72,14 +72,26 @@ func (w *Worker) RunReady(ctx context.Context, ready chan<- struct{}) error {
 		}
 	}()
 
+	// ackWait/maxDeliver: production defaults unless a test overrides them
+	// via Config.AckWait/ConsumerMaxDeliver (see config.go's doc comment
+	// on those fields — zero means "use the default", exactly like
+	// AdvertiseEvery/AdvertiseTTL).
+	ackWait := w.cfg.AckWait
+	if ackWait == 0 {
+		ackWait = 30 * time.Second
+	}
+	maxDeliver := w.cfg.ConsumerMaxDeliver
+	if maxDeliver == 0 {
+		maxDeliver = 2
+	}
 	for _, mc := range w.cfg.Models {
 		mc := mc
 		cons, err := w.js.CreateOrUpdateConsumer(ctx, wire.StreamInference, jetstream.ConsumerConfig{
 			Durable:       wire.Durable(mc.Name),
 			FilterSubject: wire.ReqSubject(mc.Name),
 			AckPolicy:     jetstream.AckExplicitPolicy,
-			AckWait:       30 * time.Second,
-			MaxDeliver:    2,
+			AckWait:       ackWait,
+			MaxDeliver:    maxDeliver,
 			MaxAckPending: mc.MaxInflight,
 		})
 		if err != nil {
