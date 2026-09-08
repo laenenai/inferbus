@@ -239,9 +239,9 @@ func (w *Worker) handle(ctx context.Context, mc ModelConfig, msg jetstream.Msg) 
 		Stream *bool `json:"stream"`
 	}
 	_ = json.Unmarshal(msg.Data(), &probe)
-	// Embeddings are never streamed, regardless of a stray "stream" field
-	// in the request body (the gateway rejects that combination before it
-	// ever reaches the worker, but don't trust that here).
+	// The worker itself never streams an embed request: any "stream" field
+	// in the body is ignored for m.kind == "embed", so it always takes the
+	// non-streaming branch below and returns exactly one result frame.
 	streaming := m.kind != "embed" && probe.Stream != nil && *probe.Stream
 
 	if !streaming {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,7 +12,22 @@ import (
 	"github.com/laenenai/inferbus/internal/relay"
 	"github.com/laenenai/inferbus/internal/testutil"
 	"github.com/laenenai/inferbus/internal/wire"
+	"github.com/laenenai/inferbus/internal/worker"
 )
+
+// countingEmbedEngine wraps a *testutil.FakeEngine and counts calls to
+// Embed, so a test can distinguish "Embed ran once" from "Embed ran again
+// on redelivery" without relying on relay.Listener timing (which cannot
+// observe JetStream-level redelivery — see TestWorkerEmbedUnsupported).
+type countingEmbedEngine struct {
+	*testutil.FakeEngine
+	embedCalls atomic.Int32
+}
+
+func (e *countingEmbedEngine) Embed(ctx context.Context, model string, body json.RawMessage) (json.RawMessage, wire.Usage, error) {
+	e.embedCalls.Add(1)
+	return e.FakeEngine.Embed(ctx, model, body)
+}
 
 // TestWorkerEmbedRequest: publish a request with header Ib-Kind: embed to a
 // worker whose FakeEngine returns a known embeddings body; assert exactly
@@ -73,8 +89,29 @@ func TestWorkerEmbedRequest(t *testing.T) {
 // -> one KindError frame with code "unsupported_kind" and HTTPStatus 400;
 // message acked (never redelivered); usage event status "error".
 func TestWorkerEmbedUnsupported(t *testing.T) {
-	eng := &testutil.FakeEngine{EmbedErr: ibengine.ErrUnsupported}
-	nc, js := startWorker(t, eng)
+	// A short AckWait (instead of the 30s production default) so the test
+	// can actually wait past it and observe whether JetStream redelivers —
+	// see the countingEmbedEngine assertion below. worker.Config.AckWait
+	// is a test-only knob (never loaded from YAML) added in M5 for exactly
+	// this purpose (mirrors internal/e2e/m5_hardening_test.go).
+	const ackWait = time.Second
+	eng := &countingEmbedEngine{FakeEngine: &testutil.FakeEngine{EmbedErr: ibengine.ErrUnsupported}}
+
+	nc, js := testutil.RunNATS(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w := worker.New(nc, js, map[string]ibengine.Engine{"m1": eng}, worker.Config{
+		WorkerID: "w-test",
+		Models:   []worker.ModelConfig{{Name: "m1", MaxInflight: 2}},
+		AckWait:  ackWait,
+	})
+	ready := make(chan struct{})
+	go func() { _ = w.RunReady(ctx, ready) }()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker not ready")
+	}
 
 	sub, err := nc.SubscribeSync("metering.usage.>")
 	if err != nil {
@@ -114,15 +151,18 @@ func TestWorkerEmbedUnsupported(t *testing.T) {
 		t.Fatalf("usage event = %+v", ev)
 	}
 
-	// Redelivery check: the message must have been acked, so JetStream
-	// must not deliver it again. Since publishAndListen/relay.Listen use a
-	// fresh core-NATS subject for responses, redelivery would show up as a
-	// second KindError frame arriving on the same reply subject. Give it a
-	// beat and confirm nothing more shows up.
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	if _, err := l.Next(ctx); err == nil {
-		t.Fatal("unexpected second frame: message was redelivered")
+	// Redelivery check: the message must have been acked on the
+	// unsupported-embed path, so JetStream must not deliver it again. A
+	// second l.Next call can't observe this — relay.Listener.Next
+	// short-circuits to io.EOF once drain's terminal KindError frame sets
+	// l.done, before it would ever consult the channel or ctx — so we
+	// instead wait comfortably past the real, short (1s) AckWait and
+	// check the engine's own call count: a missing ack would make
+	// JetStream redeliver once AckWait expires, which would invoke
+	// eng.Embed a second time.
+	time.Sleep(ackWait * 5 / 2)
+	if got := eng.embedCalls.Load(); got != 1 {
+		t.Fatalf("eng.Embed invoked %d times, want 1 (message must not be redelivered after ack)", got)
 	}
 }
 
