@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -286,25 +288,41 @@ func runHarvester(args []string, stdout io.Writer) int {
 	// Wire the harvester's OnRow to the ledger's AddUsage.
 	h.OnRow(ledger.AddUsage)
 
-	// Run both in parallel using an errgroup pattern.
-	var eg sync.WaitGroup
-	errChan := make(chan error, 2)
+	// runCtx is a child of ctx that can be canceled independently when
+	// either component fails fatally, allowing graceful HTTP shutdown.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
 
-	eg.Add(1)
+	// Channels to report non-context errors from components.
+	hDone := make(chan error, 1)
+	ledgerDone := make(chan error, 1)
+
 	go func() {
-		defer eg.Done()
-		if err := h.Run(ctx); err != nil && err != context.Canceled {
-			errChan <- fmt.Errorf("harvester: %w", err)
+		if err := h.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			hDone <- err
 		}
 	}()
 
-	eg.Add(1)
 	go func() {
-		defer eg.Done()
-		if err := ledger.Run(ctx); err != nil && err != context.Canceled {
-			errChan <- fmt.Errorf("budget ledger: %w", err)
+		if err := ledger.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			ledgerDone <- err
 		}
 	}()
+
+	// Health check: both components running.
+	failedCh := make(chan struct{})
+	var once sync.Once
+	watch := func(done <-chan error, name string) {
+		if err := <-done; err != nil {
+			slog.Error("harvester: component failed", "component", name, "err", err)
+			once.Do(func() { close(failedCh) })
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); watch(hDone, "harvester") }()
+	go func() { defer wg.Done(); watch(ledgerDone, "budget-ledger") }()
 
 	// Start HTTP server for healthz/readyz.
 	srv := &http.Server{
@@ -312,36 +330,67 @@ func runHarvester(args []string, stdout io.Writer) int {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/healthz" {
 				w.WriteHeader(http.StatusOK)
-				fmt.Fprint(w, "ok")
+				fmt.Fprint(w, "OK")
 			} else if r.URL.Path == "/readyz" {
-				// readyz returns 200 when the harvester is running.
+				// readyz returns 503 if either component has failed,
+				// 200 only while both are running.
+				select {
+				case <-failedCh:
+					w.WriteHeader(http.StatusServiceUnavailable)
+					fmt.Fprint(w, "unhealthy: harvester or budget ledger has stopped")
+					return
+				default:
+				}
 				w.WriteHeader(http.StatusOK)
-				fmt.Fprint(w, "ok")
+				fmt.Fprint(w, "OK")
 			} else {
 				w.WriteHeader(http.StatusNotFound)
 			}
 		}),
 	}
 
-	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errChan <- fmt.Errorf("http server: %w", err)
-		}
-	}()
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.ListenAndServe() }()
+
+	shutdownHTTP := func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+		<-srvErr
+	}
 
 	fmt.Fprintf(stdout, "harvester listening on %s\n", cfg.Addr)
 
-	// Wait for all goroutines to complete.
-	eg.Wait()
-
-	// Check if any error was sent.
+	var runErr error
 	select {
-	case err := <-errChan:
-		fmt.Fprintln(stdout, err)
-		return 1
-	default:
+	case <-ctx.Done():
+		shutdownHTTP()
+	case e := <-srvErr:
+		if e != nil && e != http.ErrServerClosed {
+			runErr = e
+		}
+	case <-failedCh:
+		// One of the components failed fatally; shut down HTTP and return error.
+		// The prior log line via slog.Error names which component and why.
+		slog.Error("harvester: component failure; shutting down")
+		runErr = errors.New("harvester: component failed (see prior log line for the cause)")
+		shutdownHTTP()
+		cancelRun()
 	}
 
+	// Wait for component watchers to finish.
+	wg.Wait()
+
+	// Cleanup: shutdown HTTP if not already done.
+	select {
+	case <-srvErr:
+	default:
+		shutdownHTTP()
+	}
+
+	if runErr != nil {
+		fmt.Fprintln(stdout, runErr)
+		return 1
+	}
 	return 0
 }

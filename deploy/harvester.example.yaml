@@ -7,7 +7,7 @@ addr: ":8082"
 nats_url: "nats://localhost:4222"
 
 # clickhouse_dsn is the connection string to ClickHouse (required).
-# In docker-compose, this points to the clickhouse service on its JetStream port.
+# In docker-compose, this points to the clickhouse service on its native protocol port (9000).
 # Note: the database (inferbus) must already exist in ClickHouse.
 clickhouse_dsn: "clickhouse://clickhouse:9000/inferbus"
 
