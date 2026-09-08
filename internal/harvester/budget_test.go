@@ -475,8 +475,14 @@ func TestBudgetLedger_PeriodicRebaseline_CorrectsAddUsageDoubleCountDrift(t *tes
 
 	putKeyEntry(t, keysKV, cpkv.HashKey("plaintext-i2"), cpkv.KeyEntry{Id: "key-i2", MonthlyTokenBudget: 10000})
 
+	// Rebaseline interval deliberately WIDE (2s) relative to the flush
+	// interval (100ms): the middle assertion below observes the transient
+	// double-counted state via KV polling, and a tight rebaseline could
+	// correct the drift before any poll iteration ever sees it — which is
+	// exactly the flake CI hit on slow runners. With 2s the dirty flush
+	// (<=100ms) is reliably visible long before the corrective tick.
 	l := harvester.NewBudgetLedger(js, sink, 100*time.Millisecond)
-	l.SetRebaselineInterval(150 * time.Millisecond)
+	l.SetRebaselineInterval(2 * time.Second)
 	l.SetNowFn(func() time.Time { return time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC) })
 	startBudgetLedger(t, l)
 
@@ -495,8 +501,8 @@ func TestBudgetLedger_PeriodicRebaseline_CorrectsAddUsageDoubleCountDrift(t *tes
 	})
 
 	// The next periodic re-baseline must correct the drift back to the
-	// sink's true total.
-	pollUntil(t, 5*time.Second, func() bool {
+	// sink's true total (deadline comfortably past the 2s interval).
+	pollUntil(t, 15*time.Second, func() bool {
 		e, ok := getBudgetEntry(t, js, "key-i2")
 		return ok && e.Used == 50
 	})
