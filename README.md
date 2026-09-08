@@ -36,7 +36,8 @@ the client as SSE. Workers also emit per-request usage events onto a
 - **Metering built in** — every request (success, error, or cancel) emits a
   usage event with tokens, TTFT, queue time, and provider attribution.
 
-**Status:** pre-alpha (M2 — data path). See [docs/design.md](docs/design.md)
+**Status:** pre-alpha (M4 — data path, control plane, and usage pipeline
+shipped). See [docs/design.md](docs/design.md)
 for the full design spec and milestone plan, and
 [docs/design/console-mock](docs/design/console-mock) for the management
 console design (Design Component artboards for the planned v2 console).
@@ -121,33 +122,39 @@ rejects further requests from an exhausted key with `402`. See
 
 ```sh
 docker compose -f deploy/docker-compose.yaml up -d --build
+```
+
+The compose file brings up the whole stack: NATS (JetStream), Postgres,
+ClickHouse, the gateway (port 8080), one worker, the control plane (port
+8081), and the harvester (port 8082). Every service is load-bearing —
+nothing in it is idle scaffolding.
+
+The compose gateway runs in `iam.mode: kv` (`deploy/gateway.kv.example.yaml`),
+so keys and aliases come from the control plane rather than a checked-in
+YAML credential, and monthly token budgets are enforced. Create an org, a
+project, an alias, and a key first (steps 2–5 below), then call the gateway
+with the key that step 5 returns:
+
+```sh
 curl http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer ib_dev_change_me" \
+  -H "Authorization: Bearer $IB_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"fast","stream":true,"messages":[{"role":"user","content":"hello"}]}'
 ```
 
-The compose file brings up NATS (JetStream), the gateway (port 8080), and one
-worker. The worker's example config (`deploy/worker.example.yaml`) points at
+The worker's example config (`deploy/worker.example.yaml`) points at
 `http://host.docker.internal:11434` so the containerized worker can reach a
 model server (e.g. Ollama running `llama3.2`) on the Docker host; if your
 engine runs in-network instead (its own compose service, or another
-container), change that URL to the service's name. The example key
-`ib_dev_change_me` is allowed to use the alias `fast`, which resolves to the
-concrete model `llama3.2`.
+container), change that URL to the service's name.
 
-**Change the example key before exposing the gateway to anything but your own
-machine** — `ib_dev_change_me` is a public, checked-in credential.
+Until the gateway's first KEYS/ALIASES scan completes (i.e. while the
+control plane is still starting), `GET /readyz` and every authenticated
+request answer 503 rather than 401.
 
-Postgres and ClickHouse containers are also defined in the compose file for
-forward compatibility with the control plane and usage pipeline.
+## Control plane
 
-## Control plane (optional)
-
-The quickstart above uses static YAML keys and aliases. To enable the
-Postgres-backed control plane instead:
-
-1. Start the full stack (control plane service starts automatically):
+1. Start the stack (the control plane service starts automatically):
 ```sh
 docker compose -f deploy/docker-compose.yaml up -d --build
 ```
@@ -168,12 +175,14 @@ curl -X POST http://localhost:8081/admin/v1/orgs/acme/projects \
   -d '{"id":"default","name":"Default"}'
 ```
 
-4. Set an alias:
+4. Set an alias. The target must be NATS-subject-safe (lowercase
+`[a-z0-9-]`), which is the same token a worker's model name resolves to —
+so a worker serving `llama3.2` is reached by the target `llama3-2`:
 ```sh
 curl -X PUT http://localhost:8081/admin/v1/aliases/acme/fast \
   -H "Authorization: Bearer dev_admin_change_me" \
   -H "Content-Type: application/json" \
-  -d '{"target":"llama3.2"}'
+  -d '{"target":"llama3-2"}'
 ```
 
 5. Create an API key:
@@ -183,27 +192,32 @@ curl -X POST http://localhost:8081/admin/v1/keys \
   -H "Content-Type: application/json" \
   -d '{"org":"acme","project":"default","name":"dev","allow":["fast"]}'
 ```
-The response includes the plaintext key (shown once); use it in the data-plane
-chat curl instead of `ib_dev_change_me`.
+The response includes the plaintext key (shown once); export it as `IB_KEY`
+and use it in the Quickstart's chat curl.
 
-6. Switch the gateway to KV mode by editing `deploy/gateway.example.yaml`:
-Replace the entire `keys:` and `aliases:` blocks with:
-```yaml
-iam:
-  mode: kv
+6. Read an org's usage (requires the control plane's optional
+`clickhouse_dsn`, which the compose config sets; otherwise this answers 501):
+```sh
+curl "http://localhost:8081/admin/v1/usage?org=acme&window=7d" \
+  -H "Authorization: Bearer dev_admin_change_me"
 ```
+`window` is one of `24h`, `7d`, `30d`; the response buckets an org's usage by
+model, alias, provider, and status.
 
-Then restart the gateway and try the same chat curl with your created key.
-
-**Note:** KV mode forbids a static `keys:` list in the config and will error
-on startup if found. The gateway `/readyz` endpoint gates on IAM sync. To
-re-enable static mode, revert the gateway config and restart.
+**Static mode (no control plane).** To run the gateway against a checked-in
+YAML key list instead, mount `deploy/gateway.example.yaml` in the compose
+gateway service (it ships the example key `ib_dev_change_me` allowed to use
+the alias `fast` → `llama3.2`) and restart it. **Change that key before
+exposing the gateway to anything but your own machine** — it is a public,
+checked-in credential. KV mode forbids a static `keys:` list and errors on
+startup if it finds one; static mode has no budget enforcement.
 
 ## Budgets (optional)
 
-Requires the control plane and the harvester both running — the default
-compose stack starts both automatically alongside the gateway. Create a key
-with a monthly token budget:
+Requires the control plane, the harvester, and a gateway in `iam.mode: kv`
+— the default compose stack is exactly that (a static-mode gateway has no
+`BUDGETS` projection to watch and never returns 402). Create a key with a
+monthly token budget:
 
 ```sh
 curl -X POST http://localhost:8081/admin/v1/keys \
@@ -231,6 +245,12 @@ curl -X PUT http://localhost:8081/admin/v1/keys/<id>/limits \
   -d '{"monthly_token_budget":1000000}'
 ```
 
+**Upgrading an M3 deployment.** KEYS entries projected before M4 carry no
+key id, and the budget ledger can only attribute a budget to an entry that
+has one. Any key you touch afterwards (limits, allowlist, rotation) is
+backfilled automatically; to heal every entry at once, run
+`POST /admin/v1/projections/resync` on the control plane after upgrading.
+
 Enforcement is eventually consistent by design (docs/design-usage.md's
 amendment to §11): a request in the window between crossing the budget and
 the next ledger flush plus gateway KV-watch propagation may still succeed.
@@ -239,7 +259,10 @@ watch.
 
 ## Configuration
 
-Gateway (`deploy/gateway.example.yaml`) — static IAM and alias table:
+Gateway — the compose stack uses `deploy/gateway.kv.example.yaml` (control
+plane as the source of keys and aliases, budgets enforced). The static
+alternative, `deploy/gateway.example.yaml`, carries its own IAM and alias
+table:
 
 ```yaml
 addr: ":8080"
@@ -305,15 +328,21 @@ budgets:
 
 ```yaml
 nats_url: nats://localhost:4222
-clickhouse_dsn: "clickhouse://clickhouse:9000/inferbus"
+clickhouse_dsn: "clickhouse://inferbus:inferbus@localhost:9000/inferbus"
 batch_max_events: 500        # flush trigger: accumulated events (default 500)
 batch_max_interval: 2s       # flush trigger: time since last flush (default 2s)
-budget_refresh_interval: 10s # how often dirty BUDGETS KV entries are republished (default 10s)
+budget_refresh_interval: 10s # how often dirty BUDGETS KV entries are republished
+                             # and month rollover is checked (default 10s).
+                             # Budgets themselves arrive on a live KEYS watch.
 ```
 
 The compose file already runs this as the `harvester` service, gated on both
-`nats` and `clickhouse` being healthy. To run it standalone against that same
-stack: `inferbus harvester -config deploy/harvester.example.yaml`.
+`nats` and `clickhouse` being healthy; it points the same file at the
+compose network with `INFERBUS_NATS_URL` and `INFERBUS_CLICKHOUSE_DSN`
+(either environment variable overrides its config counterpart). The
+endpoints in the file are the ports compose publishes to the host, so
+running it standalone against that stack works as written:
+`inferbus harvester -config deploy/harvester.example.yaml`.
 
 ## Wire contract
 

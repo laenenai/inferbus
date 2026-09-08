@@ -100,8 +100,8 @@ The original private scaffold served as the porting source, not the destination;
 
 ### 6.3 `inferbus harvester`
 
-- Durable JetStream consumer on `METERING`; batches (size- and time-bounded) inserts into ClickHouse; acks after successful insert. At-least-once delivery + ClickHouse dedup (§10) = effectively exactly-once accounting.
-- Owns ClickHouse schema; migrations embedded and applied on startup.
+- Durable JetStream consumer on `METERING`; batches (size- and time-bounded) inserts into ClickHouse; acks after successful insert. At-least-once delivery + ClickHouse dedup (§10) = effectively exactly-once accounting **in `usage_events`**; the hourly rollup fed by the materialized view is approximate under redelivery, so exact reads (including `GET /admin/v1/usage`) go to `usage_events FINAL` — see [design-usage.md](design-usage.md) §2.
+- Owns ClickHouse schema; `CREATE ... IF NOT EXISTS` DDL applied on startup (there is no versioned migration system yet — a schema change against an existing deployment is an operator task).
 - No HTTP surface beyond `/healthz`/`/readyz` and metrics.
 
 ### 6.4 Shared internals

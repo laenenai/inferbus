@@ -262,6 +262,14 @@ func runHarvester(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, "harvester:", err)
 		return 1
 	}
+	// I7 (final review): the checked-in example config is host-reachable so
+	// it works standalone; the compose service supplies compose hostnames
+	// through the environment instead, mirroring INFERBUS_NATS_URL (applied
+	// inside connect). Without this, the one file both uses could only ever
+	// be right for one of them.
+	if env := os.Getenv("INFERBUS_CLICKHOUSE_DSN"); env != "" {
+		cfg.ClickHouseDSN = env
+	}
 	ctx, stop := signalContext()
 	defer stop()
 

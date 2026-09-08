@@ -1,0 +1,21 @@
+# Gateway configuration for control-plane (kv) mode — the config the
+# compose stack in this directory mounts.
+#
+# In kv mode the gateway reads API keys and aliases live from the control
+# plane's KEYS/ALIASES NATS KV buckets, and enforces monthly token budgets
+# from the harvester's BUDGETS bucket (HTTP 402 once a key is exhausted).
+# There is deliberately no `keys:` list here: kv mode never consults one,
+# and the gateway refuses to start if both are present.
+#
+# The HTTP server binds immediately. Until the first scan of both KV
+# buckets completes — e.g. while the control plane is still starting — GET
+# /readyz and every authenticated request answer 503 (not 401), then the
+# gateway serves normally. Create a key through the control plane's admin
+# API (see the README quickstart) before making a request.
+#
+# For a control-plane-free setup with static YAML keys and aliases, use
+# gateway.example.yaml instead.
+addr: ":8080"
+request_timeout: 5m
+iam:
+  mode: kv

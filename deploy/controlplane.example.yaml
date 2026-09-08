@@ -6,4 +6,7 @@ nats_url: nats://localhost:4222
 #   audience: "[YOUR-AUDIENCE]"
 platform_admins: []
 bootstrap_token: dev_admin_change_me
-# clickhouse_dsn: "clickhouse://localhost:9000/inferbus"  # optional: enables GET /admin/v1/usage
+# clickhouse_dsn enables GET /admin/v1/usage (501 without it). Optional:
+# if it is set but unreachable at startup, the control plane logs a warning
+# and keeps serving everything else, with the usage endpoint reporting 501.
+clickhouse_dsn: "clickhouse://inferbus:inferbus@clickhouse:9000/inferbus"

@@ -30,8 +30,10 @@ type Config struct {
 	BatchMaxInterval time.Duration `yaml:"batch_max_interval"`
 
 	// BudgetRefreshInterval controls how often the budget ledger (Task 5)
-	// reloads budgets from the KV store. Unused by the batcher itself but
-	// defined here so Config stays in one place.
+	// republishes dirty BUDGETS KV entries and checks for a month
+	// rollover. It is NOT a budget poll interval: budgets are learned from
+	// a live watch on the KEYS bucket (M1, final review). Unused by the
+	// batcher itself but defined here so Config stays in one place.
 	BudgetRefreshInterval time.Duration `yaml:"budget_refresh_interval"`
 }
 

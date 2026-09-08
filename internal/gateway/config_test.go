@@ -85,3 +85,29 @@ func TestConfigParsesExplicitKVMode(t *testing.T) {
 		t.Errorf("IAM.Mode = %q, want %q", cfg.IAM.Mode, "kv")
 	}
 }
+
+// TestKVExampleConfigParses is the golden test for
+// deploy/gateway.kv.example.yaml, the config the compose stack mounts
+// (final review I6: the stack shipped a static gateway, so the README's
+// budgets quickstart could never produce the 402 it documented — 402
+// enforcement exists only in kv mode). It must parse, be kv mode, and
+// carry no static keys — the gateway refuses to start if a kv config also
+// lists keys.
+func TestKVExampleConfigParses(t *testing.T) {
+	cfg, err := gateway.LoadConfig("../../deploy/gateway.kv.example.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig(deploy/gateway.kv.example.yaml): %v", err)
+	}
+	if cfg.IAM.Mode != "kv" {
+		t.Errorf("IAM.Mode = %q, want kv", cfg.IAM.Mode)
+	}
+	if len(cfg.Keys) != 0 {
+		t.Errorf("Keys = %+v, want none in a kv-mode config", cfg.Keys)
+	}
+	if cfg.Addr != ":8080" {
+		t.Errorf("Addr = %q, want :8080", cfg.Addr)
+	}
+	if cfg.RequestTimeout != 5*time.Minute {
+		t.Errorf("RequestTimeout = %v, want 5m", cfg.RequestTimeout)
+	}
+}
