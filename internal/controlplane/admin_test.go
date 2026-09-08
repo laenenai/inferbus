@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
+
 	"github.com/laenenai/inferbus/internal/controlplane/alias"
 	"github.com/laenenai/inferbus/internal/controlplane/apikey"
 	"github.com/laenenai/inferbus/internal/controlplane/org"
@@ -33,6 +35,7 @@ type adminFixture struct {
 	orgRT   OrgRuntime
 	keyRT   KeyRuntime
 	aliasRT AliasRuntime
+	js      jetstream.JetStream
 }
 
 func newAdminFixture(t *testing.T, cfg Config, verifier TokenVerifier, resync func(context.Context) error, healthy func() bool) *adminFixture {
@@ -66,8 +69,8 @@ func newAdminFixture(t *testing.T, cfg Config, verifier TokenVerifier, resync fu
 	if resync == nil {
 		resync = func(context.Context) error { return nil }
 	}
-	admin := NewAdmin(NewAuthenticator(cfg, verifier), rs, orgRT, keyRT, aliasRT, resync, healthy, nil)
-	return &adminFixture{admin: admin, rs: rs, orgRT: orgRT, keyRT: keyRT, aliasRT: aliasRT}
+	admin := NewAdmin(NewAuthenticator(cfg, verifier), rs, orgRT, keyRT, aliasRT, resync, healthy, nil, js)
+	return &adminFixture{admin: admin, rs: rs, orgRT: orgRT, keyRT: keyRT, aliasRT: aliasRT, js: js}
 }
 
 // doRequest fires one request through mux and returns the recorded
@@ -572,7 +575,7 @@ func TestAdmin_ConflictRetryOnce_ThenFailOn409(t *testing.T) {
 	// Bootstrap is PlatformAdmin, so authorizeOrg short-circuits without
 	// ever consulting a ReadStore — this test needs none of the
 	// SQL-projector machinery, just the retry-then-409 dispatch path.
-	admin := NewAdmin(NewAuthenticator(cfg, &fakeVerifier{}), NewMemReadStore(), orgRT, keyRT, aliasRT, func(context.Context) error { return nil }, nil, nil)
+	admin := NewAdmin(NewAuthenticator(cfg, &fakeVerifier{}), NewMemReadStore(), orgRT, keyRT, aliasRT, func(context.Context) error { return nil }, nil, nil, nil)
 	mux := admin.Routes()
 
 	rec := doRequest(t, mux, http.MethodPost, "/admin/v1/orgs", "s3cret", map[string]any{
