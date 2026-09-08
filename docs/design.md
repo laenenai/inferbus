@@ -20,7 +20,7 @@ The original private scaffold served as the porting source, not the destination;
 - JetStream work-queue transport with observable per-model backlogs and queue-depth admission control.
 - Workers that need **nothing but NATS** plus their engine endpoints — no database, no control-plane access.
 - Embedded Bifrost in the worker for provider routing (vLLM, llama.cpp, Ollama, MLX, OpenAI, Anthropic, …).
-- Usage pipeline: worker → `METERING` stream → harvester → ClickHouse; budgets and dashboards read ClickHouse.
+- Usage pipeline: worker → `METERING` stream → harvester → ClickHouse; dashboards and admin usage reads come from ClickHouse, while budget state reaches gateways as a NATS KV projection (see [docs/design-usage.md](docs/design-usage.md)).
 - Single Go module, single multi-command binary, one-command `docker compose` quickstart.
 - Zero references to internal platforms; zero private dependencies.
 
@@ -84,7 +84,7 @@ The original private scaffold served as the porting source, not the destination;
 - **Request lifecycle:**
   1. Authenticate API key (constant-time hash lookup, in-memory cache over Postgres).
   2. Resolve alias → concrete model from the KV-watched alias map (org override first, then global; a request naming a concrete model directly is treated as an alias lookup miss → 404 unless an alias of that name exists).
-  3. Authorize: key's alias allowlist, rate limit (token bucket per key), budget check (cached ClickHouse aggregate, §11).
+  3. Authorize: key's alias allowlist, rate limit (token bucket per key), budget check (`BUDGETS` KV projection, §11 and [docs/design-usage.md](docs/design-usage.md)).
   4. Admission: check per-model backlog (JetStream consumer info, cached ~1s); above threshold → `429` with `Retry-After`.
   5. Publish request to `inference.req.<model>` with a unique reply subject; relay response messages to the client as SSE; forward client disconnect as a cancel message.
 - **Alias projection:** on every alias mutation the admin API writes Postgres transactionally, then upserts the KV entry. On startup the gateway reconciles the `ALIASES` bucket from Postgres (KV is a pure, rebuildable projection — never authoritative, never hand-edited). `POST /admin/v1/aliases/resync` forces reconciliation.
@@ -166,7 +166,7 @@ Admin API and (v2) console authenticate humans via OIDC bearer JWTs — configur
 - `usage_events` — `ReplacingMergeTree` keyed `(org, ts, req_id)` (replays from at-least-once delivery collapse on `req_id`), partitioned monthly, TTL configurable (default 13 months).
 - Materialized views: `usage_hourly_by_org_model`, `usage_hourly_by_project`, `usage_daily_by_key` — SummingMergeTree aggregates of tokens/requests/errors/latency quantiles.
 
-**Consumers of ClickHouse:** harvester writes; gateway budget checks read `usage_daily_by_key`/monthly sums; admin API `usage` endpoints read the MVs; Grafana dashboards (a starter dashboard JSON ships in `deploy/`).
+**Consumers of ClickHouse:** harvester writes (and its budget ledger reads month-to-date sums — gateways consume the `BUDGETS` KV projection, never ClickHouse); admin API `usage` endpoints read the MVs; Grafana dashboards (a starter dashboard JSON ships in `deploy/`).
 
 ## 11. Budgets
 
