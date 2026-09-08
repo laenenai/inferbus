@@ -19,3 +19,23 @@ aliases:
 #             # appeared), GET /readyz and every authenticated request
 #             # answer 503 (not 401) until the first KV scan completes,
 #             # then the gateway serves normally.
+# admission:
+#   max_backlog: 32          # reject a request when the model's queue already
+#                            # holds this many entries (JetStream consumer
+#                            # NumPending + NumAckPending). 0 — the default,
+#                            # and what you get by leaving this block
+#                            # commented out — disables admission control
+#                            # entirely. A rejected request gets HTTP 429 with
+#                            # error.type "overloaded" and a Retry-After
+#                            # header, instead of being queued behind work no
+#                            # worker is going to reach in time.
+#   retry_after_seconds: 2   # Retry-After value on the 429 (default 2).
+#   overrides:               # per-model limits, keyed by the CONCRETE model
+#     llama3.2: 8            # name (the alias target), not the alias. An
+#     embed-small: 0         # override of 0 exempts that model.
+#
+# Backlog is read from the model's durable consumer and cached for one
+# second per model, so a burst costs one JetStream lookup, not one per
+# request. The check fails open: if the consumer doesn't exist yet (no
+# worker has ever started for that model) or JetStream is slow to answer,
+# the request is admitted rather than rejected.

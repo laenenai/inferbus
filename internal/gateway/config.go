@@ -34,12 +34,34 @@ type IAMConfig struct {
 	Mode string `yaml:"mode"`
 }
 
+// AdmissionConfig turns on per-model backlog admission control: before
+// publishing, the gateway compares the model's JetStream consumer backlog
+// (NumPending + NumAckPending) against a limit and answers 429 +
+// Retry-After instead of adding one more request to a queue nobody is
+// draining. It is off by default — MaxBacklog 0 means no checker is built
+// at all, so an unconfigured gateway pays exactly zero overhead.
+type AdmissionConfig struct {
+	// MaxBacklog is the default per-model queue depth at (or above) which
+	// new requests are rejected. 0 disables admission control entirely.
+	MaxBacklog int `yaml:"max_backlog"`
+	// RetryAfterSeconds is the Retry-After value sent with the 429.
+	// LoadConfig defaults it to 2 when an admission block is present but
+	// leaves this unset.
+	RetryAfterSeconds int `yaml:"retry_after_seconds"`
+	// Overrides maps a CONCRETE model name (post-alias-resolution, the same
+	// name wire.Durable() slugs into a consumer name) to its own limit,
+	// replacing MaxBacklog for that model. An override of 0 exempts the
+	// model from the check.
+	Overrides map[string]int `yaml:"overrides"`
+}
+
 type Config struct {
 	Addr           string            `yaml:"addr"`
 	RequestTimeout time.Duration     `yaml:"request_timeout"`
 	Keys           []KeyConfig       `yaml:"keys"`
 	Aliases        map[string]string `yaml:"aliases"`
 	IAM            IAMConfig         `yaml:"iam"`
+	Admission      AdmissionConfig   `yaml:"admission"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -59,6 +81,13 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if c.IAM.Mode == "" {
 		c.IAM.Mode = "static"
+	}
+	// Only fill the Retry-After default when the operator actually asked
+	// for admission control: defaulting it unconditionally would leave a
+	// nonzero RetryAfterSeconds sitting in every config that never enables
+	// the feature, which reads as "configured" to anyone dumping the config.
+	if (c.Admission.MaxBacklog > 0 || len(c.Admission.Overrides) > 0) && c.Admission.RetryAfterSeconds == 0 {
+		c.Admission.RetryAfterSeconds = defaultRetryAfterSeconds
 	}
 	return c, nil
 }
