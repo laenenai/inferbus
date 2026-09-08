@@ -6,6 +6,7 @@ package harvester
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/laenenai/inferbus/internal/wire"
@@ -83,16 +84,17 @@ type Sink interface {
 
 // FakeSink is an in-memory implementation of Sink for testing. It deduplicates
 // rows by ReqID (first one wins) and tracks an optional FailNext error to
-// inject failures on demand for retry testing.
+// inject failures on demand for retry testing. FakeSink is thread-safe.
 type FakeSink struct {
-	Rows    []Row
+	mu       sync.Mutex
+	rows     []Row
 	FailNext error
 }
 
 // NewFakeSink creates a new FakeSink.
 func NewFakeSink() *FakeSink {
 	return &FakeSink{
-		Rows: []Row{},
+		rows: []Row{},
 	}
 }
 
@@ -100,6 +102,9 @@ func NewFakeSink() *FakeSink {
 // FailNext is set, it returns that error once and clears it; otherwise, the
 // first occurrence of each ReqID is kept.
 func (fs *FakeSink) InsertBatch(ctx context.Context, rows []Row) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
 	if fs.FailNext != nil {
 		err := fs.FailNext
 		fs.FailNext = nil
@@ -108,13 +113,13 @@ func (fs *FakeSink) InsertBatch(ctx context.Context, rows []Row) error {
 
 	// Deduplicate by ReqID: build a map of ReqIDs already seen.
 	seen := make(map[string]bool)
-	for _, existing := range fs.Rows {
+	for _, existing := range fs.rows {
 		seen[existing.ReqID] = true
 	}
 
 	for _, row := range rows {
 		if !seen[row.ReqID] {
-			fs.Rows = append(fs.Rows, row)
+			fs.rows = append(fs.rows, row)
 			seen[row.ReqID] = true
 		}
 	}
@@ -122,13 +127,27 @@ func (fs *FakeSink) InsertBatch(ctx context.Context, rows []Row) error {
 	return nil
 }
 
+// RowsSnapshot returns a copy of all rows currently stored in the sink. It is
+// safe to call concurrently and should be used for test assertions after
+// concurrent operations.
+func (fs *FakeSink) RowsSnapshot() []Row {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	snapshot := make([]Row, len(fs.rows))
+	copy(snapshot, fs.rows)
+	return snapshot
+}
+
 // MonthToDate returns the sum of TotalTokens for all rows matching keyID and
 // month (in "2006-01" format). Month boundaries are respected: a row in August
 // and a row in September are counted separately even if they share the same
 // keyID.
 func (fs *FakeSink) MonthToDate(ctx context.Context, keyID, month string) (int64, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
 	var total int64
-	for _, row := range fs.Rows {
+	for _, row := range fs.rows {
 		if row.KeyID == keyID {
 			// Check if the row's timestamp matches the month in "2006-01" format.
 			rowMonth := row.TS.Format("2006-01")
