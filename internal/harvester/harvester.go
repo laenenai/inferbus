@@ -369,7 +369,9 @@ func (h *Harvester) doFlush(ctx context.Context, batch []heldMsg) {
 
 	if err := h.sink.InsertBatch(ctx, rows); err != nil {
 		slog.Warn("harvester: insert batch failed, nak'ing for redelivery", "err", err, "held", len(batch))
-		h.metrics.insertFailures.Add(float64(len(batch)))
+		// Same deduped-row dimension as rowsInserted below, so the two
+		// counters can be compared and summed meaningfully.
+		h.metrics.insertFailures.Add(float64(len(rows)))
 		for _, item := range batch {
 			if nakErr := item.msg.NakWithDelay(nakRedeliverDelay); nakErr != nil {
 				slog.Warn("harvester: nak failed", "req_id", item.row.ReqID, "err", nakErr)
