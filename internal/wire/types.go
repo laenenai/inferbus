@@ -55,3 +55,19 @@ type UsageEvent struct {
 	Estimated      bool      `json:"estimated"`
 	TS             time.Time `json:"ts"`
 }
+
+// WorkerAd is a worker's advertisement in the MODELS KV bucket
+// (key = worker id). Best-effort presence data: entries expire via the
+// bucket TTL when a worker stops heartbeating.
+type WorkerAd struct {
+	WorkerID  string          `json:"worker_id"`
+	Models    []WorkerAdModel `json:"models"`
+	StartedAt time.Time       `json:"started_at"`
+	LastSeen  time.Time       `json:"last_seen"`
+}
+
+type WorkerAdModel struct {
+	Name        string `json:"name"`
+	Engine      string `json:"engine"`
+	MaxInflight int    `json:"max_inflight"`
+}

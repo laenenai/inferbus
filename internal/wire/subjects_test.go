@@ -1,6 +1,11 @@
 package wire
 
-import "testing"
+import (
+	"encoding/json"
+	"reflect"
+	"testing"
+	"time"
+)
 
 func TestSlug(t *testing.T) {
 	cases := map[string]string{
@@ -41,5 +46,60 @@ func TestSubjects(t *testing.T) {
 	}
 	if got := Durable("llama-70b"); got != "model-llama-70b" {
 		t.Errorf("Durable = %q", got)
+	}
+}
+
+func TestWorkerAdRoundTrip(t *testing.T) {
+	// Assert constants exist and have correct values
+	if got := BucketModels; got != "MODELS" {
+		t.Errorf("BucketModels = %q, want %q", got, "MODELS")
+	}
+	if got := ModelsTTL; got != 45*time.Second {
+		t.Errorf("ModelsTTL = %v, want %v", got, 45*time.Second)
+	}
+	if got := ModelsHeartbeat; got != 15*time.Second {
+		t.Errorf("ModelsHeartbeat = %v, want %v", got, 15*time.Second)
+	}
+	if got := ModelsTTL; got != 3*ModelsHeartbeat {
+		t.Errorf("ModelsTTL = %v, want 3*ModelsHeartbeat = %v", got, 3*ModelsHeartbeat)
+	}
+
+	// Create a WorkerAd with two models
+	// Note: time.Time loses monotonic clock info when marshaled to JSON,
+	// so we use UTC().Round(0) to strip the monotonic clock before creating the original.
+	now := time.Now().UTC().Round(0)
+	original := WorkerAd{
+		WorkerID: "worker-123",
+		Models: []WorkerAdModel{
+			{
+				Name:        "llama-70b",
+				Engine:      "ollama",
+				MaxInflight: 10,
+			},
+			{
+				Name:        "qwen-7b",
+				Engine:      "vllm",
+				MaxInflight: 20,
+			},
+		},
+		StartedAt: now,
+		LastSeen:  now,
+	}
+
+	// Marshal to JSON
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+
+	// Unmarshal back
+	var unmarshaled WorkerAd
+	if err := json.Unmarshal(data, &unmarshaled); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	// Check equality
+	if !reflect.DeepEqual(original, unmarshaled) {
+		t.Errorf("RoundTrip failed: original %+v != unmarshaled %+v", original, unmarshaled)
 	}
 }
