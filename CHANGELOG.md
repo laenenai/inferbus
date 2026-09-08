@@ -25,7 +25,7 @@ First public release.
 ### Hardening (M5)
 - Admission control: gateway `admission: {max_backlog, retry_after_seconds, overrides}`, per-model JetStream backlog with a 1s cache; 429 + `Retry-After`, `error.type "overloaded"`. Disabled by default; `overrides` without `max_backlog` logs a startup warning.
 - `MODELS` KV: workers best-effort advertise `{worker_id, models, started_at, last_seen}` (15s heartbeat / 45s TTL); model changes still require a worker restart.
-- Zero-config worker: `inferbus worker -engine <url> [-nats <url>] [-max-inflight N]` discovers models via `/v1/models` at startup.
+- Zero-config worker: `inferbus worker -engine <url> [-nats <url>] [-max-inflight N]` discovers models via `/v1/models` at startup, keeping each engine's model id verbatim (`llama3.2:latest`, `meta-llama/Llama-3.2-1B-Instruct`) — NATS subjects are derived from the id, so an alias must target that exact id.
 - `GET /admin/v1/workers` — platform-admin fleet listing sourced from the `MODELS` KV bucket.
 - Prometheus `/metrics` on the gateway (`inferbus_requests_total{route,code}`, `inferbus_admission_rejected_total{model}`, `inferbus_inflight_requests`) and the harvester (`inferbus_usage_rows_inserted_total`, `inferbus_insert_failures_total`, `inferbus_budget_entries{state}`). The worker and control plane expose no `/metrics`.
 - E2E coverage: worker-crash redelivery, admission-control 429 under synthetic backlog, zero-config worker discovery.
