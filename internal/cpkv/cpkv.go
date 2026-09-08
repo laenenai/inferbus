@@ -18,10 +18,11 @@ import (
 	"encoding/hex"
 )
 
-// Bucket names for the two KV projections.
+// Bucket names for the KV projections.
 const (
 	BucketAliases = "ALIASES"
 	BucketKeys    = "KEYS"
+	BucketBudgets = "BUDGETS"
 )
 
 // GlobalScope is the ALIASES bucket's cross-org default scope: an entry
@@ -64,6 +65,16 @@ type KeyEntry struct {
 	// it, so this field is always false in the current projector. It is
 	// kept in the schema for a possible future soft-disable read model.
 	Disabled bool `json:"disabled,omitempty"`
+}
+
+// BudgetEntry is the BUDGETS bucket's value schema (JSON), stored under key =
+// the API key's stable stream id (the keyid). It tracks monthly usage and
+// budget for each key.
+type BudgetEntry struct {
+	Used     int64  `json:"used"`     // tokens used in the month
+	Budget   int64  `json:"budget"`   // monthly budget in tokens (0 = unlimited)
+	Exceeded bool   `json:"exceeded"` // true if budget was exceeded
+	Month    string `json:"month"`    // month in "2006-01" format
 }
 
 // HashKey returns the lowercase hex-encoded SHA-256 hash of plaintext. This
