@@ -9,7 +9,13 @@ import (
 )
 
 type KeyConfig struct {
-	Key     string   `yaml:"key"`
+	Key string `yaml:"key"`
+	// ID is the key's stable attribution id (M4 Task 1, design-usage.md
+	// §3). It's optional in static config — falls back to Name (below)
+	// wherever it's consulted (gateway.go's chatCompletions) — since a
+	// static deployment has no separate stream-id concept the way the
+	// control plane's apikey aggregate does.
+	ID      string   `yaml:"id"`
 	Name    string   `yaml:"name"`
 	Org     string   `yaml:"org"`
 	Project string   `yaml:"project"`

@@ -338,9 +338,29 @@ func TestM3FullLoop(t *testing.T) {
 		return resp
 	}
 
+	// Attribution (M4 Task 1): the request published onto the data plane
+	// must carry Ib-Key-Id as the key's stable id (keyResp.ID, the apikey
+	// aggregate's stream id), never its display-only Name ("e2e-key") —
+	// this is what lets M4's usage/budget attribution survive a key
+	// rename. Subscribe before firing the request so no frame can be
+	// missed.
+	reqSub, err := cp.nc.SubscribeSync("inference.req.>")
+	if err != nil {
+		t.Fatalf("subscribe inference.req.>: %v", err)
+	}
+	defer reqSub.Unsubscribe()
+
 	resp := doChat(keyResp.Key)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("chat completion status = %d, want 200", resp.StatusCode)
+	}
+
+	reqMsg, err := reqSub.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("expected a published inference request: %v", err)
+	}
+	if got := reqMsg.Header.Get(wire.HdrKeyID); got != keyResp.ID {
+		t.Fatalf("Ib-Key-Id = %q, want the key's stable id %q (not its display name %q)", got, keyResp.ID, "e2e-key")
 	}
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
 		resp.Body.Close()

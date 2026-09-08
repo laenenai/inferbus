@@ -309,13 +309,14 @@ func TestKVProjectors_KeyLifecycle(t *testing.T) {
 
 	if _, err := rt.Handle(context.Background(), stream, &controlplanev1.ApiKeyCommand{
 		Kind: &controlplanev1.ApiKeyCommand_Create{Create: &controlplanev1.CreateKey{
-			Id:           "key-1",
-			Org:          "acme",
-			Project:      "proj-1",
-			Name:         "prod",
-			Hash:         hash1,
-			Allow:        []string{"gpt-4"},
-			RateLimitRpm: 60,
+			Id:                 "key-1",
+			Org:                "acme",
+			Project:            "proj-1",
+			Name:               "prod",
+			Hash:               hash1,
+			Allow:              []string{"gpt-4"},
+			RateLimitRpm:       60,
+			MonthlyTokenBudget: 1000,
 		}},
 	}, es.Meta{}); err != nil {
 		t.Fatalf("create: %v", err)
@@ -342,8 +343,29 @@ func TestKVProjectors_KeyLifecycle(t *testing.T) {
 	})
 	entry, _ := getKeyEntry(t, keysKV, hash1)
 	if entry.Org != "acme" || entry.Project != "proj-1" || entry.Name != "prod" ||
-		len(entry.Allow) != 1 || entry.Allow[0] != "gpt-4" || entry.RateLimitRPM != 60 {
-		t.Fatalf("hash1 entry after create = %+v, want Org=acme Project=proj-1 Name=prod Allow=[gpt-4] RateLimitRPM=60", entry)
+		len(entry.Allow) != 1 || entry.Allow[0] != "gpt-4" || entry.RateLimitRPM != 60 ||
+		entry.Id != "key-1" || entry.MonthlyTokenBudget != 1000 {
+		t.Fatalf("hash1 entry after create = %+v, want Org=acme Project=proj-1 Name=prod Allow=[gpt-4] RateLimitRPM=60 Id=key-1 MonthlyTokenBudget=1000", entry)
+	}
+
+	// SetLimits must update the budget in KV (task brief: KEYS entries carry
+	// Id/MonthlyTokenBudget, and the budget stays live across a limits
+	// change, not just at creation).
+	if _, err := rt.Handle(context.Background(), stream, &controlplanev1.ApiKeyCommand{
+		Kind: &controlplanev1.ApiKeyCommand_SetLimits{SetLimits: &controlplanev1.SetLimits{
+			RateLimitRpm:       60,
+			MonthlyTokenBudget: 5000,
+		}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("set limits: %v", err)
+	}
+	waitForKV(t, func() (bool, error) {
+		e, ok := getKeyEntry(t, keysKV, hash1)
+		return ok && e.MonthlyTokenBudget == 5000, nil
+	})
+	entry, _ = getKeyEntry(t, keysKV, hash1)
+	if entry.MonthlyTokenBudget != 5000 || entry.Id != "key-1" {
+		t.Fatalf("hash1 entry after SetLimits = %+v, want MonthlyTokenBudget=5000 Id=key-1", entry)
 	}
 
 	// set allowlist

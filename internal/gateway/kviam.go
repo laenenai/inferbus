@@ -188,7 +188,7 @@ func NewKVIAM(ctx context.Context, js jetstream.JetStream) (*KVIAM, error) {
 				slog.Error("gateway: kviam: decode KEYS entry", "hash", truncateHash(hash), "err", err)
 				continue
 			}
-			m[hash] = KeyConfig{Name: row.Name, Org: row.Org, Project: row.Project, Allow: row.Allow}
+			m[hash] = KeyConfig{ID: row.Id, Name: row.Name, Org: row.Org, Project: row.Project, Allow: row.Allow}
 		}
 		k.keys.Store(&m)
 		slog.Info("gateway: kviam: IAM snapshot applied", "bucket", cpkv.BucketKeys, "entries", len(m))

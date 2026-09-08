@@ -13,6 +13,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/laenenai/inferbus/internal/cpkv"
 	ibengine "github.com/laenenai/inferbus/internal/engine"
 	"github.com/laenenai/inferbus/internal/gateway"
 	"github.com/laenenai/inferbus/internal/testutil"
@@ -450,4 +451,67 @@ func TestKVModeUnready503(t *testing.T) {
 	assert503(t, http.MethodGet, "/readyz", "")
 	assert503(t, http.MethodGet, "/v1/models", "not-empty-to-trigger-header")
 	assert503(t, http.MethodPost, "/v1/chat/completions", `{"model":"fast","messages":[]}`)
+}
+
+// TestKVModeAttributesRequestByKeyID covers M4 Task 1's core requirement:
+// in kv mode the gateway must publish Ib-Key-Id as the KEYS entry's stable
+// id (cpkv.KeyEntry.Id, the apikey aggregate's stream id), never the
+// display-only Name — usage/budget attribution downstream (the M4
+// harvester) needs an id that survives a key rename, and Name is exactly
+// the field that can be renamed. This supersedes the M3 gateway.go
+// behavior of sending key.Name.
+func TestKVModeAttributesRequestByKeyID(t *testing.T) {
+	nc, js := testutil.RunNATS(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	w := worker.New(nc, js, map[string]ibengine.Engine{"llama-70b": &testutil.FakeEngine{}}, worker.Config{
+		WorkerID: "w1",
+		Models:   []worker.ModelConfig{{Name: "llama-70b", MaxInflight: 2}},
+	})
+	ready := make(chan struct{})
+	go func() { _ = w.RunReady(ctx, ready) }()
+	<-ready
+
+	keysKV := createBucket(t, js, cpkv.BucketKeys)
+	aliasesKV := createBucket(t, js, cpkv.BucketAliases)
+	putAliasEntry(t, aliasesKV, "_global/smart", cpkv.AliasEntry{Target: "llama-70b"})
+
+	const plaintext = "ib_test_kv_attrib"
+	hash := cpkv.HashKey(plaintext)
+	putKeyEntry(t, keysKV, hash, cpkv.KeyEntry{
+		Id:      "key-stable-id-1",
+		Name:    "display-name-that-can-change",
+		Org:     "acme",
+		Project: "prod",
+		Allow:   []string{"smart"},
+	})
+
+	kviam := newTestKVIAM(t, js)
+	g := gateway.NewWithIAM(nc, js, gateway.Config{
+		RequestTimeout: 30 * time.Second,
+		IAM:            gateway.IAMConfig{Mode: "kv"},
+	}, kviam)
+	srv := httptest.NewServer(g.Routes())
+	t.Cleanup(srv.Close)
+
+	sub, err := nc.SubscribeSync("inference.req.>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Unsubscribe()
+
+	resp := post(t, srv, plaintext, `{"model":"smart","messages":[{"role":"user","content":"hi"}]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	m, err := sub.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("expected a published inference request: %v", err)
+	}
+	if got := m.Header.Get(wire.HdrKeyID); got != "key-stable-id-1" {
+		t.Fatalf("Ib-Key-Id = %q, want the key's stable id %q (not the display name)", got, "key-stable-id-1")
+	}
 }

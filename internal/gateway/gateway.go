@@ -160,6 +160,19 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// keyID returns key's stable attribution id for relay.Request.KeyID (M4
+// Task 1, design-usage.md §3): key.ID when set — the apikey aggregate's
+// stream id in kv mode, or an operator-supplied `id:` in static mode — or
+// key.Name otherwise. The fallback covers both static config with no `id:`
+// configured and KV entries projected before this field existed (old
+// entries decode Id as "").
+func keyID(key KeyConfig) string {
+	if key.ID != "" {
+		return key.ID
+	}
+	return key.Name
+}
+
 func newReqID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
@@ -215,7 +228,7 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer l.Close()
 
 	seq, err := relay.Publish(ctx, g.js, relay.Request{
-		Model: target, Org: key.Org, Project: key.Project, KeyID: key.Name,
+		Model: target, Org: key.Org, Project: key.Project, KeyID: keyID(key),
 		Alias: req.Model, ReqID: reqID, Kind: "chat", Deadline: deadline, Body: body,
 	})
 	if err != nil {

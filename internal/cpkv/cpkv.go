@@ -39,11 +39,25 @@ type AliasEntry struct {
 // KeyEntry is the KEYS bucket's value schema (JSON), stored under key =
 // the API key's current hash hex.
 type KeyEntry struct {
+	// Id is the apikey aggregate's stable stream id (M4 Task 1, design-usage.md
+	// §3): unlike Name, it never changes across a rename, so it is the field
+	// usage/budget attribution downstream keys off. Old KV entries written
+	// before this field existed simply decode it as "" — callers (gateway.go's
+	// chatCompletions) fall back to Name in that case, so pre-M4 entries keep
+	// working during rollout.
+	Id           string   `json:"id"`
 	Org          string   `json:"org"`
 	Project      string   `json:"project"`
 	Name         string   `json:"name"`
 	Allow        []string `json:"allow,omitempty"`
 	RateLimitRPM int      `json:"rate_limit_rpm,omitempty"`
+	// MonthlyTokenBudget is the key's monthly token budget (0 = unlimited),
+	// projected here as of M4 Task 1. M3 deliberately left this out of KEYS
+	// (data-plane read model) in favor of the ADMIN read model only; M4's
+	// budget-ledger harvester (design-usage.md §1) needs it available
+	// data-plane-side without a control-plane round trip, so this supersedes
+	// that M3 ruling.
+	MonthlyTokenBudget int64 `json:"monthly_token_budget,omitempty"`
 
 	// Disabled is reserved: today KeyDisabled deletes the entry entirely
 	// (spec §4 "KeyDisabled -> Delete current_hash") rather than flagging

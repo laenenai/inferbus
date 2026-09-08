@@ -385,11 +385,13 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 		// hypothetically re-run) allowlist change believe a hash exists
 		// in KEYS that was never actually written.
 		if err := p.put(ctx, c.GetHash(), KeyEntry{
-			Org:          c.GetOrg(),
-			Project:      c.GetProject(),
-			Name:         c.GetName(),
-			Allow:        c.GetAllow(),
-			RateLimitRPM: int(c.GetRateLimitRpm()),
+			Id:                 id,
+			Org:                c.GetOrg(),
+			Project:            c.GetProject(),
+			Name:               c.GetName(),
+			Allow:              c.GetAllow(),
+			RateLimitRPM:       int(c.GetRateLimitRpm()),
+			MonthlyTokenBudget: c.GetMonthlyTokenBudget(),
 		}); err != nil {
 			return err
 		}
@@ -446,14 +448,14 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 		return p.put(ctx, hash, entry)
 
 	case *controlplanev1.ApiKeyEvent_LimitsChanged:
-		// MonthlyTokenBudget is intentionally NOT projected into KeyEntry:
-		// the KV bucket is the gateway's request-time, data-plane read
-		// model (auth/allowlist/rate-limit only), and budget enforcement
-		// is an M4 concern with its own read model, not this one. The
-		// ADMIN read model (KeyRow/cp_api_keys, readmodel.go) DOES carry
-		// MonthlyTokenBudget — GET /admin/v1/keys surfaces it (I5) — so
-		// this is a deliberate data-plane/control-plane split, not an
-		// oversight.
+		// MonthlyTokenBudget IS projected into KeyEntry as of M4 Task 1
+		// (design-usage.md §3), superseding the earlier M3 ruling that kept
+		// it out of KEYS: the M4 budget-ledger harvester needs the current
+		// budget available data-plane-side (via KV) without a control-plane
+		// round trip. The ADMIN read model (KeyRow/cp_api_keys,
+		// readmodel.go) still carries it too — GET /admin/v1/keys surfaces
+		// it (I5) — that split is unaffected, this just adds a second,
+		// data-plane-facing copy.
 		hash, ok := p.hashByID[id]
 		if !ok {
 			return fmt.Errorf("controlplane: keys projector: limits change for unknown key id %q", id)
@@ -468,6 +470,7 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 			return fmt.Errorf("controlplane: keys projector: limits change for key id %q: no KEYS entry under hash %q (invariant violation)", id, hash)
 		}
 		entry.RateLimitRPM = int(k.LimitsChanged.GetRateLimitRpm())
+		entry.MonthlyTokenBudget = k.LimitsChanged.GetMonthlyTokenBudget()
 		return p.put(ctx, hash, entry)
 	}
 	return nil
