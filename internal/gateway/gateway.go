@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -59,6 +60,8 @@ func newGateway(nc *nats.Conn, js jetstream.JetStream, cfg Config, iam iamProvid
 	// feature, they only reshape it once a default limit exists.
 	if cfg.Admission.MaxBacklog > 0 {
 		g.admission = newAdmissionChecker(js, cfg.Admission)
+	} else if len(cfg.Admission.Overrides) > 0 {
+		slog.Warn("gateway: admission.overrides set but admission.max_backlog is 0 — admission control is DISABLED; set max_backlog to enable")
 	}
 	return g
 }
