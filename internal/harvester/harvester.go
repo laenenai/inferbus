@@ -153,7 +153,8 @@ func (h *Harvester) Run(ctx context.Context) error {
 		// -1 (unlimited redelivery attempts) for AckExplicit consumers.
 		// MaxAckPending must comfortably exceed BatchMaxEvents since every
 		// held-or-in-flight message stays un-acked (and thus ack-pending)
-		// until its batch flushes.
+		// until its batch flushes. Note: MaxAckPending is a consumer-wide
+		// budget shared across replicas; multi-replica tuning is future work.
 		MaxAckPending: h.cfg.BatchMaxEvents * 4,
 	})
 	if err != nil {

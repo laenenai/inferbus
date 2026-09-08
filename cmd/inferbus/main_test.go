@@ -87,3 +87,13 @@ func TestControlplaneRequiresConfig(t *testing.T) {
 		t.Fatalf("output %q should mention -config", out.String())
 	}
 }
+
+func TestHarvesterRequiresConfig(t *testing.T) {
+	var out bytes.Buffer
+	if code := run([]string{"harvester"}, &out); code == 0 {
+		t.Fatal("harvester without -config should fail")
+	}
+	if !strings.Contains(out.String(), "-config") {
+		t.Fatalf("output %q should mention -config", out.String())
+	}
+}

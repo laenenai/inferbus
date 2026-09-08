@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/nats-io/nats.go"
@@ -21,6 +22,7 @@ import (
 	"github.com/laenenai/inferbus/internal/engine/bifrostengine"
 	"github.com/laenenai/inferbus/internal/engine/openaihttp"
 	"github.com/laenenai/inferbus/internal/gateway"
+	"github.com/laenenai/inferbus/internal/harvester"
 	"github.com/laenenai/inferbus/internal/wire"
 	"github.com/laenenai/inferbus/internal/worker"
 )
@@ -239,5 +241,107 @@ func runControlplane(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, "controlplane:", err)
 		return 1
 	}
+	return 0
+}
+
+func runHarvester(args []string, stdout io.Writer) int {
+	fs := flag.NewFlagSet("harvester", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	cfgPath := fs.String("config", "", "path to harvester YAML config (required)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *cfgPath == "" {
+		fmt.Fprintln(stdout, "harvester: -config is required")
+		return 2
+	}
+	cfg, err := harvester.LoadConfig(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(stdout, "harvester:", err)
+		return 1
+	}
+	ctx, stop := signalContext()
+	defer stop()
+
+	// Connect to NATS.
+	nc, js, err := connect(cfg.NATSURL, "harvester")
+	if err != nil {
+		fmt.Fprintln(stdout, "harvester: nats:", err)
+		return 1
+	}
+	defer nc.Close()
+
+	// Create ClickHouse sink.
+	sink, err := harvester.NewCHSink(ctx, cfg.ClickHouseDSN)
+	if err != nil {
+		fmt.Fprintln(stdout, "harvester: clickhouse:", err)
+		return 1
+	}
+	defer sink.Close()
+
+	// Create the harvester and budget ledger.
+	h := harvester.New(nc, js, sink, cfg)
+	ledger := harvester.NewBudgetLedger(js, sink, cfg.BudgetRefreshInterval)
+
+	// Wire the harvester's OnRow to the ledger's AddUsage.
+	h.OnRow(ledger.AddUsage)
+
+	// Run both in parallel using an errgroup pattern.
+	var eg sync.WaitGroup
+	errChan := make(chan error, 2)
+
+	eg.Add(1)
+	go func() {
+		defer eg.Done()
+		if err := h.Run(ctx); err != nil && err != context.Canceled {
+			errChan <- fmt.Errorf("harvester: %w", err)
+		}
+	}()
+
+	eg.Add(1)
+	go func() {
+		defer eg.Done()
+		if err := ledger.Run(ctx); err != nil && err != context.Canceled {
+			errChan <- fmt.Errorf("budget ledger: %w", err)
+		}
+	}()
+
+	// Start HTTP server for healthz/readyz.
+	srv := &http.Server{
+		Addr: cfg.Addr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/healthz" {
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, "ok")
+			} else if r.URL.Path == "/readyz" {
+				// readyz returns 200 when the harvester is running.
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, "ok")
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}),
+	}
+
+	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errChan <- fmt.Errorf("http server: %w", err)
+		}
+	}()
+
+	fmt.Fprintf(stdout, "harvester listening on %s\n", cfg.Addr)
+
+	// Wait for all goroutines to complete.
+	eg.Wait()
+
+	// Check if any error was sent.
+	select {
+	case err := <-errChan:
+		fmt.Fprintln(stdout, err)
+		return 1
+	default:
+	}
+
 	return 0
 }

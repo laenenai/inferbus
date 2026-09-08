@@ -55,3 +55,12 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       nats: { condition: service_healthy }
+  harvester:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["harvester", "-config", "/etc/inferbus/harvester.yaml"]
+    environment: { INFERBUS_NATS_URL: nats://nats:4222 }
+    volumes: ["./harvester.example.yaml:/etc/inferbus/harvester.yaml:ro"]
+    ports: ["8082:8082"]
+    depends_on:
+      nats: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }

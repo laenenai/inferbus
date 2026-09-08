@@ -1,0 +1,24 @@
+# Harvester configuration example.
+# addr is the HTTP address for healthz/readyz probes (defaults to ":8082" if not set).
+addr: ":8082"
+
+# nats_url is the URL to connect to NATS (required).
+# In docker-compose, this is overridden via INFERBUS_NATS_URL environment variable.
+nats_url: "nats://localhost:4222"
+
+# clickhouse_dsn is the connection string to ClickHouse (required).
+# In docker-compose, this points to the clickhouse service on its JetStream port.
+# Note: the database (inferbus) must already exist in ClickHouse.
+clickhouse_dsn: "clickhouse://clickhouse:9000/inferbus"
+
+# batch_max_events is the number of accumulated usage events that triggers an
+# immediate flush to ClickHouse, regardless of batch_max_interval (defaults to 500).
+batch_max_events: 500
+
+# batch_max_interval is the maximum time accumulated events sit unflushed
+# before a flush is forced, regardless of batch_max_events (defaults to 2s).
+batch_max_interval: "2s"
+
+# budget_refresh_interval controls how often the budget ledger refreshes
+# budgets from the KV store (defaults to 10s).
+budget_refresh_interval: "10s"
