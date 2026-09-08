@@ -74,6 +74,25 @@ type readinessChecker interface {
 	Ready() <-chan struct{}
 }
 
+// budgetChecker is satisfied by an iamProvider that can report a key's
+// monthly token budget as exhausted — currently only *KVIAM, sourcing the
+// optional BUDGETS bucket (Task 7). staticIAM does not implement this
+// interface at all, so budgetExceeded's type assertion simply fails for it
+// and static-mode gateways never run a budget check — M2's static Config
+// has no notion of usage tracking, and Task 7 deliberately leaves it that
+// way rather than bolting a permanently-false BudgetExceeded onto
+// staticIAM.
+type budgetChecker interface {
+	BudgetExceeded(keyID string) bool
+}
+
+// budgetExceeded reports whether key's budget is exhausted, for iam
+// implementations that track one at all (kv mode only — see budgetChecker).
+func (g *Gateway) budgetExceeded(key KeyConfig) bool {
+	bc, ok := g.iam.(budgetChecker)
+	return ok && bc.BudgetExceeded(keyID(key))
+}
+
 // isReady reports whether g.iam is either not a readinessChecker at all
 // (static mode) or has completed its startup Ready() signal (kv mode,
 // once both buckets have their first snapshot).
@@ -213,6 +232,10 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if !slices.Contains(key.Allow, req.Model) {
 		oaiError(w, http.StatusForbidden, "model_forbidden", fmt.Sprintf("key is not allowed to use %q", req.Model))
+		return
+	}
+	if g.budgetExceeded(key) {
+		oaiError(w, http.StatusPaymentRequired, "budget_exhausted", "monthly token budget exhausted")
 		return
 	}
 

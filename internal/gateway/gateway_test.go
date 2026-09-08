@@ -515,3 +515,79 @@ func TestKVModeAttributesRequestByKeyID(t *testing.T) {
 		t.Fatalf("Ib-Key-Id = %q, want the key's stable id %q (not the display name)", got, "key-stable-id-1")
 	}
 }
+
+// TestKVMode_BudgetExceeded402ThenClearsOnFlip covers Task 7's core
+// requirement: in kv mode, a BUDGETS entry with Exceeded:true for the
+// authenticated key's stable id must make chatCompletions answer 402 with
+// type budget_exhausted — checked after the allowlist check (a forbidden
+// alias must still 403 first) and before the request ever reaches
+// relay.Listen/Publish (no message should hit the data plane at all). Once
+// the entry is flipped back to Exceeded:false and the watch has propagated
+// that, the identical request must succeed normally.
+func TestKVMode_BudgetExceeded402ThenClearsOnFlip(t *testing.T) {
+	nc, js := testutil.RunNATS(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	w := worker.New(nc, js, map[string]ibengine.Engine{"llama-70b": &testutil.FakeEngine{}}, worker.Config{
+		WorkerID: "w1",
+		Models:   []worker.ModelConfig{{Name: "llama-70b", MaxInflight: 2}},
+	})
+	ready := make(chan struct{})
+	go func() { _ = w.RunReady(ctx, ready) }()
+	<-ready
+
+	keysKV := createBucket(t, js, cpkv.BucketKeys)
+	aliasesKV := createBucket(t, js, cpkv.BucketAliases)
+	budgetsKV := createBucket(t, js, cpkv.BucketBudgets)
+	putAliasEntry(t, aliasesKV, "_global/smart", cpkv.AliasEntry{Target: "llama-70b"})
+
+	const plaintext = "ib_test_kv_budget"
+	hash := cpkv.HashKey(plaintext)
+	putKeyEntry(t, keysKV, hash, cpkv.KeyEntry{
+		Id: "key-budget-1", Name: "budget-key", Org: "acme", Project: "prod", Allow: []string{"smart"},
+	})
+	putBudgetEntry(t, budgetsKV, "key-budget-1", cpkv.BudgetEntry{Used: 1000, Budget: 500, Exceeded: true, Month: "2026-09"})
+
+	kviam := newTestKVIAM(t, js)
+	pollUntil(t, 5*time.Second, func() bool { return kviam.BudgetExceeded("key-budget-1") })
+
+	g := gateway.NewWithIAM(nc, js, gateway.Config{
+		RequestTimeout: 30 * time.Second,
+		IAM:            gateway.IAMConfig{Mode: "kv"},
+	}, kviam)
+	srv := httptest.NewServer(g.Routes())
+	t.Cleanup(srv.Close)
+
+	resp := post(t, srv, plaintext, `{"model":"smart","messages":[{"role":"user","content":"hi"}]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want 402", resp.StatusCode)
+	}
+	var out struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Error.Type != "budget_exhausted" {
+		t.Fatalf("error.type = %q, want budget_exhausted", out.Error.Type)
+	}
+	if out.Error.Message != "monthly token budget exhausted" {
+		t.Fatalf("error.message = %q, want %q", out.Error.Message, "monthly token budget exhausted")
+	}
+
+	// Flip the entry back under budget and confirm the identical request
+	// now succeeds once the watch has propagated the change.
+	putBudgetEntry(t, budgetsKV, "key-budget-1", cpkv.BudgetEntry{Used: 100, Budget: 500, Exceeded: false, Month: "2026-09"})
+	pollUntil(t, 5*time.Second, func() bool { return !kviam.BudgetExceeded("key-budget-1") })
+
+	resp2 := post(t, srv, plaintext, `{"model":"smart","messages":[{"role":"user","content":"hi"}]}`)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("status after flip = %d, want 200", resp2.StatusCode)
+	}
+}

@@ -49,6 +49,17 @@ func putAliasEntry(t *testing.T, kv jetstream.KeyValue, key string, entry cpkv.A
 	}
 }
 
+func putBudgetEntry(t *testing.T, kv jetstream.KeyValue, keyID string, entry cpkv.BudgetEntry) {
+	t.Helper()
+	b, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kv.Put(context.Background(), keyID, b); err != nil {
+		t.Fatalf("put budget entry %q: %v", keyID, err)
+	}
+}
+
 // pollUntil polls check every 20ms until it returns true or the deadline
 // elapses, failing the test on timeout. This is the codebase's
 // established poll-based wait idiom (see e.g.
@@ -335,5 +346,64 @@ func TestKVIAM_StableBucketNeverReconnects(t *testing.T) {
 
 	if _, ok := iam.AuthenticateKey(plaintext); !ok {
 		t.Fatal("entry disappeared after an idle period past the probe interval — a stable bucket must never lose its snapshot")
+	}
+}
+
+// TestKVIAM_BudgetExceeded_TrueAfterWatchPropagates covers the core BUDGETS
+// contract (Task 7 brief): a BUDGETS entry with Exceeded:true, put directly
+// into the bucket (as the M4 harvester's ledger projector would), must make
+// BudgetExceeded report true once KVIAM's live watcher has observed it —
+// not just after the initial scan.
+func TestKVIAM_BudgetExceeded_TrueAfterWatchPropagates(t *testing.T) {
+	_, js := testutil.RunNATS(t)
+	budgetsKV := createBucket(t, js, cpkv.BucketBudgets)
+
+	iam := newTestKVIAM(t, js)
+	if iam.BudgetExceeded("key-1") {
+		t.Fatal("expected false before any BUDGETS entry exists")
+	}
+
+	putBudgetEntry(t, budgetsKV, "key-1", cpkv.BudgetEntry{Used: 1000, Budget: 500, Exceeded: true, Month: "2026-09"})
+
+	pollUntil(t, 5*time.Second, func() bool { return iam.BudgetExceeded("key-1") })
+}
+
+// TestKVIAM_BudgetExceeded_FalseForAbsentEntry covers the "absence = no
+// budget = allow" side of the binding: a key id with no BUDGETS entry at
+// all must report false, even while a different key id's exceeded entry
+// has already propagated through the same watch — proving the false result
+// isn't just "watch hasn't synced yet."
+func TestKVIAM_BudgetExceeded_FalseForAbsentEntry(t *testing.T) {
+	_, js := testutil.RunNATS(t)
+	budgetsKV := createBucket(t, js, cpkv.BucketBudgets)
+	putBudgetEntry(t, budgetsKV, "other-key", cpkv.BudgetEntry{Used: 200, Budget: 100, Exceeded: true, Month: "2026-09"})
+
+	iam := newTestKVIAM(t, js)
+
+	// Prove the watch actually synced before asserting on the absent key.
+	pollUntil(t, 5*time.Second, func() bool { return iam.BudgetExceeded("other-key") })
+
+	if iam.BudgetExceeded("this-key-id-has-no-budget-entry") {
+		t.Fatal("expected false for a key id with no BUDGETS entry")
+	}
+}
+
+// TestKVIAM_BudgetExceeded_BucketNeverCreated_ReadyUnaffected covers the
+// binding's central "BUDGETS is optional" ruling: a control plane/harvester
+// that never creates (or hasn't yet created) the BUDGETS bucket must not
+// affect Ready() at all — KEYS/ALIASES readiness is unrelated to BUDGETS —
+// and BudgetExceeded must simply report false (no budgets = allow all)
+// rather than erroring or blocking.
+func TestKVIAM_BudgetExceeded_BucketNeverCreated_ReadyUnaffected(t *testing.T) {
+	_, js := testutil.RunNATS(t)
+
+	// newTestKVIAM creates only KEYS/ALIASES and waits on Ready() with its
+	// own timeout — if the BUDGETS watch were wired into that readiness
+	// gate, this call would hang and fail the test, since BUDGETS is never
+	// created here.
+	iam := newTestKVIAM(t, js)
+
+	if iam.BudgetExceeded("anything") {
+		t.Fatal("expected false when the BUDGETS bucket was never created")
 	}
 }
