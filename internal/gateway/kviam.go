@@ -30,6 +30,17 @@ import (
 	"github.com/laenenai/inferbus/internal/cpkv"
 )
 
+// Resolution is what an alias resolves to: the concrete model the request
+// must be routed to, plus the operator-pinned parameter overrides stored
+// alongside the alias (cpkv.AliasEntry.Params, written by the control
+// plane's ALIASES projector since M3 and surfaced to the request path as of
+// M6). Params is nil in static mode — the M2 static config's `aliases:` is
+// a flat name->target map with nowhere to put them.
+type Resolution struct {
+	Target string
+	Params map[string]string
+}
+
 // iamProvider is the gateway's key-auth + alias-resolution authority.
 // AuthenticateKey takes the raw, still-unhashed presented credential (the
 // bearer token as the client sent it) and returns the matching key's
@@ -37,7 +48,7 @@ import (
 // org-scoped alias first, falling back to the global scope.
 type iamProvider interface {
 	AuthenticateKey(presented string) (KeyConfig, bool)
-	ResolveAlias(org, alias string) (target string, ok bool)
+	ResolveAlias(org, alias string) (res Resolution, ok bool)
 }
 
 // staticIAM adapts the M2 static Config to iamProvider. Its
@@ -61,9 +72,16 @@ func (s *staticIAM) AuthenticateKey(presented string) (KeyConfig, bool) {
 	return KeyConfig{}, false
 }
 
-func (s *staticIAM) ResolveAlias(_, alias string) (string, bool) {
+// ResolveAlias returns a Resolution with no Params: static mode's
+// `aliases:` map holds bare targets, and M6 deliberately did not grow a
+// params syntax for it — alias params are a control-plane (kv mode)
+// feature.
+func (s *staticIAM) ResolveAlias(_, alias string) (Resolution, bool) {
 	target, ok := s.cfg.Aliases[alias]
-	return target, ok
+	if !ok {
+		return Resolution{}, false
+	}
+	return Resolution{Target: target}, true
 }
 
 // kvWatchMinBackoff/kvWatchMaxBackoff bound the retry delay a KVIAM watch
@@ -168,7 +186,7 @@ func truncateHash(s string) string {
 // background, independently of k.ready.
 type KVIAM struct {
 	keys    atomic.Pointer[map[string]KeyConfig]        // hash hex -> row
-	aliases atomic.Pointer[map[string]string]           // "<scope>/<name>" -> target
+	aliases atomic.Pointer[map[string]Resolution]       // "<scope>/<name>" -> target + params
 	budgets atomic.Pointer[map[string]cpkv.BudgetEntry] // key id -> budget row
 	ready   chan struct{}
 }
@@ -185,7 +203,7 @@ func NewKVIAM(ctx context.Context, js jetstream.JetStream) (*KVIAM, error) {
 
 	k := &KVIAM{ready: make(chan struct{})}
 	emptyKeys := map[string]KeyConfig{}
-	emptyAliases := map[string]string{}
+	emptyAliases := map[string]Resolution{}
 	emptyBudgets := map[string]cpkv.BudgetEntry{}
 	k.keys.Store(&emptyKeys)
 	k.aliases.Store(&emptyAliases)
@@ -210,14 +228,14 @@ func NewKVIAM(ctx context.Context, js jetstream.JetStream) (*KVIAM, error) {
 	})
 
 	go watchKV(ctx, js, cpkv.BucketAliases, aliasesReady, func(entries map[string]jetstream.KeyValueEntry) {
-		m := make(map[string]string, len(entries))
+		m := make(map[string]Resolution, len(entries))
 		for key, e := range entries {
 			var row cpkv.AliasEntry
 			if err := json.Unmarshal(e.Value(), &row); err != nil {
 				slog.Error("gateway: kviam: decode ALIASES entry", "key", key, "err", err)
 				continue
 			}
-			m[key] = row.Target
+			m[key] = Resolution{Target: row.Target, Params: row.Params}
 		}
 		k.aliases.Store(&m)
 		slog.Info("gateway: kviam: IAM snapshot applied", "bucket", cpkv.BucketAliases, "entries", len(m))
@@ -280,16 +298,18 @@ func (k *KVIAM) AuthenticateKey(presented string) (KeyConfig, bool) {
 // ResolveAlias tries the org-scoped alias first ("<org>/<alias>"), falling
 // back to the global scope ("_global/<alias>", cpkv.GlobalScope) — an
 // org-scoped entry always overrides a same-named global one, never the
-// reverse.
-func (k *KVIAM) ResolveAlias(org, alias string) (string, bool) {
+// reverse. The returned Resolution carries the winning entry's own params:
+// an org override replaces the global entry wholesale, params included,
+// rather than layering one entry's params on top of the other's.
+func (k *KVIAM) ResolveAlias(org, alias string) (Resolution, bool) {
 	m := *k.aliases.Load()
 	if org != "" {
-		if target, ok := m[org+"/"+alias]; ok {
-			return target, true
+		if res, ok := m[org+"/"+alias]; ok {
+			return res, true
 		}
 	}
-	target, ok := m[cpkv.GlobalScope+"/"+alias]
-	return target, ok
+	res, ok := m[cpkv.GlobalScope+"/"+alias]
+	return res, ok
 }
 
 // BudgetExceeded reports whether keyID (the KEYS entry's stable id — see

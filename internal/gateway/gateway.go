@@ -191,6 +191,8 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 	}{Object: "list", Data: []model{}}
 	for _, alias := range key.Allow {
 		if _, exists := g.iam.ResolveAlias(key.Org, alias); exists {
+			// Only existence matters here — /v1/models lists the alias names
+			// a key may use, never what they resolve to or with.
 			out.Data = append(out.Data, model{ID: alias, Object: "model"})
 		}
 	}
@@ -244,11 +246,12 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		oaiError(w, http.StatusBadRequest, "invalid_request_error", "body must be a JSON object with a model field")
 		return
 	}
-	target, exists := g.iam.ResolveAlias(key.Org, req.Model)
+	res, exists := g.iam.ResolveAlias(key.Org, req.Model)
 	if !exists {
 		oaiError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("unknown model alias %q", req.Model))
 		return
 	}
+	target := res.Target
 	if !slices.Contains(key.Allow, req.Model) {
 		oaiError(w, http.StatusForbidden, "model_forbidden", fmt.Sprintf("key is not allowed to use %q", req.Model))
 		return
@@ -266,6 +269,17 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		g.metrics.admissionRejected.WithLabelValues(target).Inc()
 		w.Header().Set("Retry-After", strconv.Itoa(g.admission.retryAfter()))
 		oaiError(w, http.StatusTooManyRequests, "overloaded", "model queue is full, retry later")
+		return
+	}
+
+	// Alias params (kv mode only) are baked into the body the gateway
+	// publishes, not carried as a side channel on relay.Request: the worker
+	// and the engines are deliberately dumb about aliases — whatever reaches
+	// them is already the request the operator meant. With no params this is
+	// a no-op that returns the very same byte slice.
+	body, err = mergeParams(body, res.Params)
+	if err != nil {
+		oaiError(w, http.StatusBadRequest, "invalid_request_error", "body must be a JSON object with a model field")
 		return
 	}
 
