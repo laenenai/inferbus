@@ -100,12 +100,33 @@ type FakeSink struct {
 
 	FailNext error
 
+	// monthToDateErr, if non-nil, makes every MonthToDate call return this
+	// error (0, err) instead of computing a sum, until a test clears it back
+	// to nil via SetMonthToDateErr. Unlike FailNext (which fires once, for
+	// InsertBatch), this persists across calls — the budget ledger's Task 5
+	// fix round (I3) needs a sink that stays down across an entire failed
+	// rollover attempt (both checkMonthRollover's initial loadBaseline call
+	// and flushTick's same-tick pending-baseline retry), not just the very
+	// first call. It is behind SetMonthToDateErr/mu (not a bare exported
+	// field like FailNext) because, unlike FailNext, it is read
+	// concurrently by the budget ledger's own goroutine while a test sets
+	// it from the test goroutine.
+	monthToDateErr error
+
 	// Delay, if set, makes InsertBatch sleep this long before committing
 	// rows — with the lock released during the sleep, so RowsSnapshot and
 	// concurrent InsertBatch callers are never blocked by it. Used to
 	// simulate a slow sink in tests exercising the harvester's in-flight
 	// heartbeat path.
 	Delay time.Duration
+}
+
+// SetMonthToDateErr sets (or, passed nil, clears) the error every MonthToDate
+// call returns. Safe to call concurrently with MonthToDate itself.
+func (fs *FakeSink) SetMonthToDateErr(err error) {
+	fs.mu.Lock()
+	fs.monthToDateErr = err
+	fs.mu.Unlock()
 }
 
 // NewFakeSink creates a new FakeSink.
@@ -172,6 +193,10 @@ func (fs *FakeSink) RowsSnapshot() []Row {
 func (fs *FakeSink) MonthToDate(ctx context.Context, keyID, month string) (int64, error) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
+
+	if fs.monthToDateErr != nil {
+		return 0, fs.monthToDateErr
+	}
 
 	var total int64
 	for _, row := range fs.rows {
