@@ -22,8 +22,8 @@ const (
 	HdrDeadline = "Ib-Deadline" // RFC3339Nano
 	HdrWorkerID = "Ib-Worker-Id"
 
-	ModelsTTL        = 45 * time.Second
-	ModelsHeartbeat  = 15 * time.Second
+	ModelsTTL       = 45 * time.Second
+	ModelsHeartbeat = 15 * time.Second
 )
 
 // Slug maps a model name to a NATS-subject-safe token: lowercase,
