@@ -92,11 +92,11 @@ The original private scaffold served as the porting source, not the destination;
 
 ### 6.2 `inferbus worker`
 
-- **Config:** one local YAML file; no database, no control-plane access. Maps each served concrete model name to a Bifrost provider/model config.
+- **Config:** one local YAML file; no database, no control-plane access. Maps each served concrete model name to an engine config.
 - **Loop:** one JetStream pull consumer per served model (durable `model-<slug>`), bounded concurrent handlers per model (config: `max_inflight`). In-progress ack extension (heartbeat) while a request runs; `MaxDeliver: 2` so a crashed worker's request is retried once.
-- **Engine layer:** embedded **Bifrost** (Go library). Bifrost owns provider adapters, retries, and provider-level fallback. The worker translates wire requests → Bifrost calls → streamed chunks on the reply subject.
-- **Usage:** on completion (or error/cancel) publish one usage event to `metering.usage.<org>.<project>.<model>` (fields in §10). Aborted streams set `estimated: true`.
-- **Advertisement:** heartbeat entry in the `MODELS` KV bucket (`worker.<worker_id>` → served models, versions, last-seen). Gateways use it for `/readyz`-style checks and ops visibility; TTL-expired entries drop out.
+- **Engine layer (built — two adapters, not Bifrost-only):** `openai_http` talks to any OpenAI-compatible HTTP server (Ollama, vLLM, llama.cpp) directly; embedded **Bifrost** (Go library) handles multi-provider routing (OpenAI, Anthropic, Ollama, vLLM, MLX, ...) for models that need it. Each model in config picks one engine. The worker translates wire requests → engine calls → streamed chunks on the reply subject.
+- **Usage:** on completion (or error/cancel) publish one usage event to `metering.usage.<org>.<project>.<model>` (fields in §10, superseded by [docs/design-usage.md](docs/design-usage.md)). Aborted streams set `estimated: true`.
+- **Advertisement (planned, not built):** a heartbeat entry in the `MODELS` KV bucket (`worker.<worker_id>` → served models, versions, last-seen) was designed for gateway `/readyz`-style checks and ops visibility with TTL-expired entries dropping out. This does not exist yet: a worker's model list is read once at startup, and changing it (or its config) requires restarting the worker process — there is no live reload and nothing to invalidate.
 
 ### 6.3 `inferbus harvester`
 
@@ -157,6 +157,8 @@ Admin API and (v2) console authenticate humans via OIDC bearer JWTs — configur
 
 ## 10. Usage pipeline & ClickHouse
 
+> This section is superseded by [docs/design-usage.md](docs/design-usage.md) for the M4 implementation details.
+
 **Usage event** (published by workers): `req_id`, `ts`, `org`, `project`, `key_id`, `alias`, `model` (concrete), `provider` (Bifrost provider actually used), `kind` (`chat|embed`), `prompt_tokens`, `completion_tokens`, `cached_tokens`, `ttft_ms`, `duration_ms`, `queue_ms`, `status` (`ok|error|canceled`), `error_code`, `estimated` (bool), `worker_id`.
 
 **ClickHouse schema (sketch):**
@@ -167,6 +169,8 @@ Admin API and (v2) console authenticate humans via OIDC bearer JWTs — configur
 **Consumers of ClickHouse:** harvester writes; gateway budget checks read `usage_daily_by_key`/monthly sums; admin API `usage` endpoints read the MVs; Grafana dashboards (a starter dashboard JSON ships in `deploy/`).
 
 ## 11. Budgets
+
+> This section is superseded by [docs/design-usage.md](docs/design-usage.md) for the M4 implementation details (notably: budget state reaches gateways via a NATS KV projection, not a direct ClickHouse read — see that doc's amendment).
 
 V1 budgets are **token-denominated** (`monthly_token_budget` per key). The gateway checks a cached month-to-date sum from ClickHouse (cache TTL ~30s) and rejects with `402`-styled error when exhausted. This is deliberately eventually-consistent: worst-case overshoot ≈ cache TTL × throughput, acceptable for v1 and documented. Currency budgets (price table per model) are a later addition on the same read path.
 
