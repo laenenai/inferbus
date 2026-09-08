@@ -108,7 +108,7 @@ The original private scaffold served as the porting source, not the destination;
 
 - `internal/wire` — subjects, stream/consumer definitions, message and usage-event types (ported from `pkg/inferwire`, de-branded). The single wire contract.
 - `internal/relay` — publish + response-relay logic (ported from `pkg/inferclient`'s transport core; not a public API).
-- `internal/platform` — small replacements for natskit: NATS connect w/ retry, health endpoints, OTEL setup (~200 lines total).
+- NATS connect-with-retry and `/healthz`/`/readyz` health endpoints are implemented directly per role (`cmd/inferbus`, `internal/gateway`, `internal/controlplane`) rather than in a shared package. OTEL setup is planned, not built.
 
 ## 7. Wire contract
 
@@ -166,7 +166,7 @@ Admin API and (v2) console authenticate humans via OIDC bearer JWTs — configur
 - `usage_events` — `ReplacingMergeTree` keyed `(org, ts, req_id)` (replays from at-least-once delivery collapse on `req_id`), partitioned monthly, TTL configurable (default 13 months).
 - Materialized views: `usage_hourly_by_org_model`, `usage_hourly_by_project`, `usage_daily_by_key` — SummingMergeTree aggregates of tokens/requests/errors/latency quantiles.
 
-**Consumers of ClickHouse:** harvester writes (and its budget ledger reads month-to-date sums — gateways consume the `BUDGETS` KV projection, never ClickHouse); admin API `usage` endpoints read the MVs; Grafana dashboards (a starter dashboard JSON ships in `deploy/`).
+**Consumers of ClickHouse:** harvester writes (and its budget ledger reads month-to-date sums — gateways consume the `BUDGETS` KV projection, never ClickHouse); admin API `usage` endpoints read `usage_events` directly (see [design-usage.md](design-usage.md) §2); Grafana dashboards (planned, not built).
 
 ## 11. Budgets
 
@@ -185,18 +185,17 @@ inferbus/
   cmd/inferbus/            # single binary: gateway|worker|harvester subcommands
   internal/gateway/      # HTTP, auth, alias resolution, admission, relay glue
   internal/worker/       # pull loop, Bifrost integration, usage publishing
-  internal/harvester/    # METERING consumer, ClickHouse writer + migrations
+  internal/harvester/    # METERING consumer, ClickHouse writer
   internal/wire/         # subjects, streams, message + usage types
   internal/relay/        # publish/response-relay transport core
-  internal/platform/     # NATS connect, health, OTEL helpers
   internal/controlplane/ # Postgres store, admin API, KV projection
-  deploy/                # Dockerfile, docker-compose quickstart, Grafana dashboard
+  deploy/                # Dockerfile, docker-compose quickstart
   docs/                  # self-contained design docs (this spec's content, ported)
 ```
 
 - One Docker image; role chosen by subcommand.
 - `docker compose up` quickstart: NATS (JetStream), Postgres, ClickHouse, gateway, one worker configured for a local Ollama, harvester. First-run bootstrap creates an org, a project, one API key (printed once), and a starter alias.
-- Observability: OTEL traces/metrics on all roles (no-op without `OTEL_EXPORTER_OTLP_ENDPOINT`), Prometheus-format `/metrics` optional.
+- Observability today: `/healthz`/`/readyz` per role. OTEL traces/metrics and a Prometheus-format `/metrics` endpoint are planned, not built.
 
 ## 14. Porting plan (from the private scaffold)
 
@@ -208,7 +207,7 @@ inferbus/
 | `pkg/inferclient` transport core | `internal/relay` | Not a public API |
 | `internal/rollup`, `cmd/metering-rollup` | — | Dropped (ClickHouse harvester replaces; consumer skeleton reusable) |
 | `pkg/extract`, `pkg/normalize`, `pkg/eval`, `toolrun`, `engines/gliner` | — | Stay private |
-| keyd/natskit usage | `internal/platform` | Rewritten helpers; no crypto |
+| keyd/natskit usage | `cmd/inferbus`, per-role packages | Rewritten helpers, inlined per role (no shared platform package); no crypto |
 | `cmd/inference-e2e` | `test/e2e` | Port harness; scrub internal prompt strings |
 
 **De-branding checklist:** new module path; remove internal-caller comments and internal strings in e2e prompts and image names; README rewritten standalone; internal ADR/spec references replaced by `docs/` in-repo.
@@ -225,7 +224,7 @@ inferbus/
 1. **M1 — Skeleton:** repo, binary + subcommands, wire contract, compose file with NATS/Postgres/ClickHouse.
 2. **M2 — Data path:** gateway (key auth, static aliases) → worker (Bifrost, one provider) → SSE; e2e streaming test green.
 3. **M3 — Control plane:** Postgres schema, admin API, KV alias projection, OIDC on admin routes.
-4. **M4 — Usage:** worker usage events, harvester, ClickHouse schema, budget enforcement, Grafana starter.
+4. **M4 — Usage:** worker usage events, harvester, ClickHouse schema, budget enforcement. Grafana starter dashboard: planned, not built.
 5. **M5 — Hardening + launch:** admission control, cancel/redelivery e2e, docs, console mockup, first public release.
 6. **V1.5:** priority tiers, claim-check blobs, shared rate counters. **V2:** functional console.
 

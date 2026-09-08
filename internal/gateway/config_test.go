@@ -88,8 +88,8 @@ func TestConfigParsesExplicitKVMode(t *testing.T) {
 
 // TestKVExampleConfigParses is the golden test for
 // deploy/gateway.kv.example.yaml, the config the compose stack mounts
-// (final review I6: the stack shipped a static gateway, so the README's
-// budgets quickstart could never produce the 402 it documented — 402
+// (a static gateway config would mean the README's
+// budgets quickstart could never produce the 402 it documents — 402
 // enforcement exists only in kv mode). It must parse, be kv mode, and
 // carry no static keys — the gateway refuses to start if a kv config also
 // lists keys.

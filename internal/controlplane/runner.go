@@ -237,8 +237,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// usageReader is Task 8's optional ClickHouse-backed usage reader:
-	// nil (when Config.ClickhouseDSN is empty, or — final review I9 —
-	// when ClickHouse is unreachable at boot) leaves GET /admin/v1/usage
+	// nil (when Config.ClickhouseDSN is empty, or when ClickHouse is
+	// unreachable at boot) leaves GET /admin/v1/usage
 	// reporting 501 not_configured rather than failing the whole control
 	// plane over an optional dependency. When configured and reachable,
 	// its connection is closed on every exit path via defer — this

@@ -262,8 +262,8 @@ func runHarvester(args []string, stdout io.Writer) int {
 		fmt.Fprintln(stdout, "harvester:", err)
 		return 1
 	}
-	// I7 (final review): the checked-in example config is host-reachable so
-	// it works standalone; the compose service supplies compose hostnames
+	// The checked-in example config is host-reachable so it works standalone;
+	// the compose service supplies compose hostnames
 	// through the environment instead, mirroring INFERBUS_NATS_URL (applied
 	// inside connect). Without this, the one file both uses could only ever
 	// be right for one of them.
@@ -313,8 +313,8 @@ type harvesterComponent struct {
 // healthz/readyz HTTP server until ctx is cancelled, a component dies, or
 // the HTTP server itself fails; it returns the process exit code.
 //
-// C1 (final review): each component goroutine CLOSES its done channel on
-// exit and only ever sends a value for a genuinely fatal error —
+// Each component goroutine CLOSES its done channel on exit and only ever
+// sends a value for a genuinely fatal error —
 // context.Canceled (what both components return on an ordinary shutdown)
 // is a clean exit, not a failure. The watchers range over those channels,
 // so they terminate on close as well as on a value; without that, every

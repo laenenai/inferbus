@@ -103,16 +103,16 @@ func TestHarvesterRequiresConfig(t *testing.T) {
 
 // serveHarvesterResult runs serveHarvester on its own goroutine and returns
 // a channel carrying its exit code, so a test can assert it actually
-// returns instead of hanging forever (final review C1).
+// returns instead of hanging forever.
 func serveHarvesterResult(ctx context.Context, out *bytes.Buffer, comps ...harvesterComponent) <-chan int {
 	res := make(chan int, 1)
 	go func() { res <- serveHarvester(ctx, "127.0.0.1:0", out, comps...) }()
 	return res
 }
 
-// TestServeHarvesterShutsDownOnContextCancel is the regression test for
-// final-review C1: the harvester role deadlocked on wg.Wait() for every
-// graceful-shutdown path, because both components return context.Canceled
+// TestServeHarvesterShutsDownOnContextCancel is a regression test: the
+// harvester role deadlocked on wg.Wait() for every graceful-shutdown path,
+// because both components return context.Canceled
 // (never a value on their done channels) when their context is cancelled.
 // SIGTERM is not simulated here — the supervisor body is exercised
 // directly, with components whose shutdown behaviour matches

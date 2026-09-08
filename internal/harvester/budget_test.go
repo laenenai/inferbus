@@ -568,8 +568,8 @@ func TestBudgetLedger_MonthRolloverWithFailingMonthToDate_NoStalePutThenRecovers
 	})
 }
 
-// TestBudgetLedger_PreM4EntryGainsIdOnLimitsChange is the ledger half of
-// final-review I2. A KEYS entry projected before M4 introduced
+// TestBudgetLedger_PreM4EntryGainsIdOnLimitsChange is the ledger half of the
+// pre-M4 backfill fix. A KEYS entry projected before M4 introduced
 // KeyEntry.Id carries no Id, so the ledger has nothing to key a BUDGETS
 // entry by and skips it — even when the operator sets a budget on it. The
 // control-plane fix backfills Id on every read-modify-write arm; this
@@ -653,9 +653,9 @@ func (s *blockingSink) maxInflight() int {
 	return s.maxSeen
 }
 
-// TestBudgetLedger_WedgedSinkDoesNotFreezeBudgetPublishing is the
-// regression test for final-review I3. With many budgeted keys and a sink
-// that never answers MonthToDate, the old flush tick spent
+// TestBudgetLedger_WedgedSinkDoesNotFreezeBudgetPublishing is a regression
+// test. With many budgeted keys and a sink that never answers MonthToDate,
+// the old flush tick spent
 // len(pending) × budgetOpTimeout serially on Run's goroutine and never
 // reached its flushOne loop — so a key that had already been baselined and
 // then crossed its budget via AddUsage was never published, i.e. budget

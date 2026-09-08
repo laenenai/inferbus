@@ -112,4 +112,4 @@ gateway 402 → raise budget via admin → chat succeeds.
 ## 6. Out of scope (unchanged)
 
 Currency budgets, per-request price tables, admission control (M5),
-Grafana dashboards beyond a starter JSON, console (v2).
+Grafana dashboards (planned, not built), console (v2).

@@ -18,15 +18,15 @@
 // AddUsage in particular must never block on I/O (it only ever touches an
 // in-memory map under a mutex).
 //
-// Concurrency (Task 5 fix round, C1/I1): every mutating access to a
-// ledgerRow bumps its version counter. flushOne snapshots a row's data and
+// Concurrency: every mutating access to a ledgerRow bumps its version
+// counter. flushOne snapshots a row's data and
 // version before its KV Put/Delete round-trip, then only reconciles the
 // ledger's in-memory state afterward if the version is unchanged — this is
-// what stops a KEYS update racing a flush from either (C1) un-tracking a
-// key that was resurrected mid-delete, or (I1) silently clearing the dirty
+// what stops a KEYS update racing a flush from either un-tracking a
+// key that was resurrected mid-delete, or silently clearing the dirty
 // flag on a row that AddUsage mutated while a stale Put was in flight.
 //
-// Freshness (I2/I3): a periodic full re-baseline (rebaselineAll, every
+// Freshness: a periodic full re-baseline (rebaselineAll, every
 // rebaselineInterval) re-queries Sink.MonthToDate for every already-loaded
 // budgeted row and corrects any drift — including the residual double-count
 // window inherent in seeding a brand-new row's baseline concurrently with
@@ -38,14 +38,14 @@
 // AddUsage keeps accumulating in memory during that window regardless, and
 // the entry is published in full once the new month's baseline lands.
 //
-// Watcher purity (I4): the KEYS watch goroutine (watchKeys and everything
+// Watcher purity: the KEYS watch goroutine (watchKeys and everything
 // it calls — consumeKeys, applyKeysSnapshot, reconcileKeys) never performs
 // Sink or KV I/O. It only ever mutates the in-memory ledger under mu, so a
 // wedged sink or KV store can never stall live KEYS delivery.
 //
-// Goroutine layout after the final review's I3 fix: every BUDGETS KV
-// Put/Delete (flushOne) still happens on Run's own goroutine and nowhere
-// else — that is what lets l.kv stay mutex-free. Sink.MonthToDate calls,
+// Goroutine layout: every BUDGETS KV Put/Delete (flushOne) still happens on
+// Run's own goroutine and nowhere else — that is what lets l.kv stay
+// mutex-free. Sink.MonthToDate calls,
 // by contrast, now run on a bounded pool (loadBaselines,
 // budgetBaselineConcurrency workers, each call bounded by
 // budgetBaselineTimeout) and month rollover runs on its own ticker
@@ -75,7 +75,7 @@ import (
 // tick failure (binding ruling #2).
 const budgetOpTimeout = 10 * time.Second
 
-// Baseline-fetch bounds (final review I3). The pending/re-baseline/rollover
+// Baseline-fetch bounds. The pending/re-baseline/rollover
 // passes used to call Sink.MonthToDate serially, one key at a time, each
 // bounded only by budgetOpTimeout — so with an unreachable ClickHouse and N
 // budgeted keys a single flush tick burned N × 10s on Run's goroutine and
@@ -93,7 +93,7 @@ const (
 )
 
 // defaultRebaselineInterval is how often rebaselineAll re-queries
-// Sink.MonthToDate for every already-loaded budgeted row (I2/I3), absent an
+// Sink.MonthToDate for every already-loaded budgeted row, absent an
 // explicit SetRebaselineInterval override.
 const defaultRebaselineInterval = time.Hour
 
@@ -110,8 +110,8 @@ type ledgerRow struct {
 	// version is bumped by every mutating access (AddUsage, reconcileKeys,
 	// loadBaseline, checkMonthRollover). flushOne snapshots it alongside
 	// the row's data before a KV round-trip and only reconciles
-	// afterward if it's unchanged — see the package doc comment's C1/I1
-	// paragraph.
+	// afterward if it's unchanged — see the package doc comment's
+	// Concurrency paragraph.
 	version uint64
 }
 
@@ -136,7 +136,7 @@ type BudgetLedger struct {
 	// kv is the BUDGETS bucket handle. It is only ever read or written on
 	// Run's own goroutine (Run's setup line, and flushOne's M3
 	// re-ensure-on-bucket-not-found path) — the KEYS watch goroutine never
-	// touches it (I4) — so, like runCtx, it needs no mutex.
+	// touches it — so, like runCtx, it needs no mutex.
 	kv jetstream.KeyValue
 
 	mu                 sync.Mutex

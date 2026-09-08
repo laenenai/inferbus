@@ -7,8 +7,7 @@
 // model/alias/provider/status for one org over a caller-selected recency
 // window. It deliberately does NOT read the usage_hourly rollup: that
 // SummingMergeTree is fed by an INSERT-triggered materialized view and so
-// permanently double-counts any redelivered METERING event (final review
-// I1).
+// permanently double-counts any redelivered METERING event.
 //
 // The control plane MAY import clickhouse-go (it owns databases, per the
 // M4 usage design); internal/gateway must not — that's asserted at review
@@ -86,8 +85,8 @@ type CHUsageReader struct {
 func NewCHUsageReader(ctx context.Context, dsn string) (*CHUsageReader, error) {
 	opts, err := clickhouse.ParseDSN(dsn)
 	if err != nil {
-		// I8 (final review): ParseDSN's error is a *net/url.Error that
-		// reproduces the whole URL, password included, and this error is
+		// ParseDSN's error is a *net/url.Error that reproduces the whole
+		// URL, password included, and this error is
 		// printed to stdout by cmd/inferbus. Never propagate it, and never
 		// echo the DSN.
 		return nil, errClickhouseDSN
@@ -104,11 +103,11 @@ func NewCHUsageReader(ctx context.Context, dsn string) (*CHUsageReader, error) {
 }
 
 // errClickhouseDSN is what a malformed clickhouse_dsn produces: a fixed
-// string that cannot carry the DSN's credentials into a log (I8).
+// string that cannot carry the DSN's credentials into a log.
 var errClickhouseDSN = errors.New("controlplane: invalid clickhouse_dsn: could not be parsed; check its syntax (the DSN is deliberately not echoed here — it may carry a password)")
 
-// Query bounds for the admin usage endpoint (final review I10). The query
-// carried no LIMIT, no execution-time cap, and the handler passed a bare
+// Query bounds for the admin usage endpoint. The query carried no LIMIT,
+// no execution-time cap, and the handler passed a bare
 // request context, so a `viewer` — the lowest-privileged role that clears
 // the "read" gate — could hold the driver's 10-connection pool open on
 // 30-day scans indefinitely. Every OrgUsage call is now bounded three ways:
@@ -123,8 +122,8 @@ const (
 // record, read with FINAL — by the endpoint's response shape (model, alias,
 // provider, status) for one org.
 //
-// I1 (final review): this used to read the usage_hourly rollup. A
-// ClickHouse materialized view is an INSERT trigger, so usage_hourly_mv
+// This used to read the usage_hourly rollup. A ClickHouse materialized
+// view is an INSERT trigger, so usage_hourly_mv
 // fires on every physical insert block, before and independent of any
 // merge, and its SummingMergeTree target has no dedup concept at all — a
 // redelivered METERING message (an Ack that failed after a successful
@@ -140,7 +139,7 @@ const (
 // unit+quantity pair; validUsageWindow has already confirmed it is one of
 // the fixed usageWindowIntervals values, never caller-supplied SQL text.
 // The window is anchored on toStartOfHour(now()) so two calls minutes apart
-// return the same totals for unchanged data (M13). count() is cast to
+// return the same totals for unchanged data. count() is cast to
 // Int64 explicitly: it is UInt64 in ClickHouse, and the driver refuses to
 // scan a UInt64 into UsageBucket.Requests (int64).
 const orgUsageSQL = `
@@ -163,7 +162,7 @@ SETTINGS max_execution_time = %d
 // re-validates so it is safe to call directly (as the env-gated
 // integration test does) without going through the handler.
 //
-// I10: the caller's context is further bounded by usageQueryTimeout here,
+// The caller's context is further bounded by usageQueryTimeout here,
 // server-side, so the endpoint's cost does not depend on the client
 // keeping its socket open.
 func (r *CHUsageReader) OrgUsage(ctx context.Context, org, window string) ([]UsageBucket, error) {
@@ -181,7 +180,7 @@ func (r *CHUsageReader) OrgUsage(ctx context.Context, org, window string) ([]Usa
 	}
 	defer rows.Close()
 
-	// M12: a non-nil empty slice, so an org with no usage serializes as
+	// A non-nil empty slice, so an org with no usage serializes as
 	// "buckets": [] rather than "buckets": null — matching every sibling
 	// list handler in this package.
 	out := make([]UsageBucket, 0)
@@ -204,7 +203,7 @@ func (r *CHUsageReader) Close() error {
 }
 
 // newUsageReader builds the optional ClickHouse usage reader for
-// Runner.Run. A connect/ping failure is NOT fatal (final review I9): it
+// Runner.Run. A connect/ping failure is NOT fatal: it
 // logs loudly and returns a nil UsageReader, which makes GET
 // /admin/v1/usage answer 501 not_configured — the degraded path the design
 // already specifies — instead of aborting Runner.Run and taking the relay,

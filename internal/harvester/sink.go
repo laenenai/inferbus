@@ -103,9 +103,9 @@ type FakeSink struct {
 	// monthToDateErr, if non-nil, makes every MonthToDate call return this
 	// error (0, err) instead of computing a sum, until a test clears it back
 	// to nil via SetMonthToDateErr. Unlike FailNext (which fires once, for
-	// InsertBatch), this persists across calls — the budget ledger's Task 5
-	// fix round (I3) needs a sink that stays down across an entire failed
-	// rollover attempt (both checkMonthRollover's initial loadBaseline call
+	// InsertBatch), this persists across calls — the budget ledger tests need
+	// a sink that stays down across an entire failed rollover attempt (both
+	// checkMonthRollover's initial loadBaseline call
 	// and flushTick's same-tick pending-baseline retry), not just the very
 	// first call. It is behind SetMonthToDateErr/mu (not a bare exported
 	// field like FailNext) because, unlike FailNext, it is read

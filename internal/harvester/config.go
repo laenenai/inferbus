@@ -32,7 +32,7 @@ type Config struct {
 	// BudgetRefreshInterval controls how often the budget ledger (Task 5)
 	// republishes dirty BUDGETS KV entries and checks for a month
 	// rollover. It is NOT a budget poll interval: budgets are learned from
-	// a live watch on the KEYS bucket (M1, final review). Unused by the
+	// a live watch on the KEYS bucket. Unused by the
 	// batcher itself but defined here so Config stays in one place.
 	BudgetRefreshInterval time.Duration `yaml:"budget_refresh_interval"`
 }

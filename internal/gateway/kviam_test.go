@@ -229,7 +229,7 @@ func TestKVIAM_MissingBucketRetriesUntilCreated(t *testing.T) {
 		t.Fatalf("NewKVIAM: %v", err)
 	}
 
-	// NewKVIAM must have returned immediately (I6), well before either
+	// NewKVIAM must have returned immediately, well before either
 	// bucket exists — Ready() must not have closed yet.
 	select {
 	case <-kv.Ready():

@@ -177,8 +177,8 @@ func withDatabase(dsn, name string) (string, error) {
 	return u.String(), nil
 }
 
-// TestNewCHSink_MalformedDSNDoesNotLeakPassword is the regression test for
-// final-review I8: clickhouse.ParseDSN fails with a *net/url.Error whose
+// TestNewCHSink_MalformedDSNDoesNotLeakPassword is a regression test:
+// clickhouse.ParseDSN fails with a *net/url.Error whose
 // Error() reproduces the entire URL, userinfo included (net/url does not
 // redact passwords in error strings), and cmd/inferbus prints this error
 // straight to stdout — i.e. container logs and every aggregator downstream

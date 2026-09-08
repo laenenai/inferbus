@@ -112,9 +112,10 @@ never valid on the data plane.
   - `proj-sql-admin` (filter `evt.controlplane.>`) → Postgres read tables
     (`cp_orgs`, `cp_org_members`, `cp_projects`, `cp_api_keys`,
     `cp_aliases`) for admin GETs and lists.
-- **Checkpointing:** a `cp_projection_marker` table (projection →
-  highest-applied `global_position`); handlers are idempotent by comparing
-  positions. At-least-once delivery is the contract.
+- **Checkpointing:** the `CP_MARKERS` NATS KV bucket (key per projection,
+  e.g. `proj-sql-admin`, `proj-kv-aliases`; value the highest-applied
+  `global_position`); handlers are idempotent by comparing positions.
+  At-least-once delivery is the contract.
 - **Startup & rebuild:** on boot each projector runs `projection.Replay`
   against the store's `ReadAll` from its marker, then switches to live
   `Consume`. `resync` clears a KV bucket and replays from position 0 — this

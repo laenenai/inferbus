@@ -811,8 +811,8 @@ func TestKVProjectors_FailStop(t *testing.T) {
 	}
 }
 
-// TestKVProjectors_LimitsChangeBackfillsIdOnPreM4Entry is the regression
-// test for final-review I2: a KEYS entry projected before M4 added
+// TestKVProjectors_LimitsChangeBackfillsIdOnPreM4Entry is a regression
+// test: a KEYS entry projected before M4 added
 // KeyEntry.Id decodes with Id == "", and the harvester's budget ledger
 // skips every such entry — so setting a monthly budget on a pre-M4 key
 // used to be a silent, permanent no-op (the entry got the budget but never

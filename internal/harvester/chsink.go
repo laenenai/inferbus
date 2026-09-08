@@ -26,13 +26,12 @@ type CHSink struct {
 
 // errClickHouseDSN is the only thing a malformed clickhouse_dsn ever
 // produces: a fixed string that cannot carry the DSN's credentials into a
-// log (final review I8). Host/database are reported for reachability
-// failures instead, where the DSN did parse and there is nothing secret to
-// spill.
+// log. Host/database are reported for reachability failures instead, where
+// the DSN did parse and there is nothing secret to spill.
 var errClickHouseDSN = errors.New("harvester: invalid clickhouse_dsn: could not be parsed; check its syntax (the DSN is deliberately not echoed here — it may carry a password)")
 
 // chTarget renders the parsed DSN's host list for error messages. Only the
-// address is included — never Auth.Password (I8).
+// address is included — never Auth.Password.
 func chTarget(opts *clickhouse.Options) string {
 	return strings.Join(opts.Addr, ",")
 }
@@ -47,8 +46,8 @@ func chTarget(opts *clickhouse.Options) string {
 func NewCHSink(ctx context.Context, dsn string) (*CHSink, error) {
 	opts, err := clickhouse.ParseDSN(dsn)
 	if err != nil {
-		// I8 (final review): never propagate ParseDSN's error, and never
-		// echo the DSN. ParseDSN fails with a *net/url.Error whose Error()
+		// Never propagate ParseDSN's error, and never echo the DSN.
+		// ParseDSN fails with a *net/url.Error whose Error()
 		// reproduces the entire URL — userinfo included, since net/url does
 		// not redact passwords in error strings — and cmd/inferbus prints
 		// this straight to stdout, i.e. container logs and every log

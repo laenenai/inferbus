@@ -176,9 +176,9 @@ func TestAdmin_Usage_NilReaderNotConfigured(t *testing.T) {
 // allowance) and asserts CHUsageReader.OrgUsage reads them back grouped by
 // model/alias/provider/status for the requested window.
 //
-// One row is inserted twice, byte-identical, to reproduce the JetStream
-// redelivery final-review I1 is about (an Ack that failed after a
-// successful insert): reading usage_events FINAL must count it once. The
+// One row is inserted twice, byte-identical, to reproduce a JetStream
+// redelivery (an Ack that failed after a successful insert): reading
+// usage_events FINAL must count it once. The
 // old usage_hourly read path counted it twice, permanently.
 //
 // Skips cleanly when CP_TEST_CH_DSN is unset, exactly like
@@ -352,9 +352,9 @@ func chTestDatabase(t *testing.T, ctx context.Context, baseDSN string) (dsn stri
 	return dsn, cleanup
 }
 
-// TestNewCHUsageReader_MalformedDSNDoesNotLeakPassword is the regression
-// test for final-review I8: clickhouse.ParseDSN fails with a
-// *net/url.Error whose Error() reproduces the entire URL, userinfo
+// TestNewCHUsageReader_MalformedDSNDoesNotLeakPassword is a regression
+// test: clickhouse.ParseDSN fails with a *net/url.Error whose Error()
+// reproduces the entire URL, userinfo
 // included (net/url does not redact passwords in error strings), and
 // cmd/inferbus prints this error straight to stdout — i.e. container logs
 // and every aggregator downstream. The returned error must never contain
@@ -379,8 +379,8 @@ func TestNewCHUsageReader_MalformedDSNDoesNotLeakPassword(t *testing.T) {
 	}
 }
 
-// TestNewUsageReader_UnreachableClickHouseDegradesToNil covers final-review
-// I9: an unreachable (or malformed) clickhouse_dsn must degrade GET
+// TestNewUsageReader_UnreachableClickHouseDegradesToNil covers the case
+// where an unreachable (or malformed) clickhouse_dsn must degrade GET
 // /admin/v1/usage to its documented 501 not_configured path, not abort
 // Runner.Run — which would take the relay, the KV projectors and the whole
 // admin API down with it, so an analytics dependency could stop key
@@ -398,8 +398,8 @@ func TestNewUsageReader_UnreachableClickHouseDegradesToNil(t *testing.T) {
 	}
 }
 
-// TestOrgUsageSQL_ReadsDedupedEventsWithinBounds pins the query shape the
-// final review's I1 and I10 rulings require: reads come from usage_events
+// TestOrgUsageSQL_ReadsDedupedEventsWithinBounds pins the query shape: reads
+// come from usage_events
 // (the ReplacingMergeTree ledger of record, with FINAL) rather than the
 // usage_hourly SummingMergeTree rollup — which permanently double-counts a
 // redelivered event, since a materialized view is an INSERT trigger with no
