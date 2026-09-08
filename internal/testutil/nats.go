@@ -23,7 +23,18 @@ func RunNATS(t *testing.T) (*nats.Conn, jetstream.JetStream) {
 		t.Fatal("nats server not ready")
 	}
 	t.Cleanup(srv.Shutdown)
-	nc, err := nats.Connect(srv.ClientURL())
+	// ReadyForConnections is necessary but not sufficient under load: with
+	// dozens of embedded servers starting across parallel packages under
+	// -race, the first dial still loses the handshake to an i/o timeout
+	// often enough to redden a run (~2/30 observed). Retrying the connect
+	// turns that scheduling artifact into a short wait instead of a test
+	// failure; the timeout below still bounds a genuinely dead server.
+	nc, err := nats.Connect(srv.ClientURL(),
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(10),
+		nats.ReconnectWait(100*time.Millisecond),
+		nats.Timeout(5*time.Second),
+	)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
