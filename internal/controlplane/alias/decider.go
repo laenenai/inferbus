@@ -26,6 +26,7 @@ package alias
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	controlplanev1 "github.com/laenenai/inferbus/api/controlplane/v1"
 	"github.com/laenenai/inferbus/internal/wire"
@@ -51,6 +52,49 @@ const StreamType = "alias"
 // is rejected, because it would name the dangling subject
 // "inference.req." / durable "model-".
 var ErrInvalidTarget = errors.New("alias: invalid target")
+
+// ErrReservedParam is returned by SetAlias when params contains a key
+// reserved for gateway/worker routing decisions: "model" or "stream",
+// matched case-insensitively. Both are already-decided facts by the time
+// an alias's params would apply: "model" is what alias resolution itself
+// just resolved to (letting an alias rewrite it would let one alias
+// impersonate another target), and "stream" is what request handling
+// already read off the client's request to pick between the streaming and
+// non-streaming response path (an alias flipping it after the fact would
+// desynchronize the response shape from the transport the handler is
+// already committed to — this fixed a real hang in Task 3). Rejecting
+// both here, in Decide, means the invariant holds for every command path
+// that can ever set an alias's params, not just the admin HTTP handler;
+// internal/gateway/params.go's reservedParams skip is defense in depth
+// for state that reached KV some other way (a hand-edited bucket, an
+// older projector), not the primary enforcement point.
+var ErrReservedParam = errors.New("alias: reserved param key")
+
+// reservedParamKeys mirrors internal/gateway/params.go's reservedParams
+// set (both entries, "model" and "stream", lowercase). It is duplicated
+// here rather than imported: the control plane must not depend on the
+// gateway package, which itself does not depend on the control plane
+// today. Keep the two sets in sync if either grows.
+var reservedParamKeys = map[string]struct{}{
+	"model":  {},
+	"stream": {},
+}
+
+// firstReservedParamKey reports the first key in params (map iteration
+// order — nondeterministic when more than one match, but Decide only
+// needs to name one offending key) whose lowercased form is reserved. The
+// matching is case-insensitive for the same reason
+// internal/gateway/params.go's skip is: encoding/json matches struct
+// field names case-insensitively with a later duplicate winning, so an
+// alias param spelled "Stream" must be rejected exactly like "stream".
+func firstReservedParamKey(params map[string]string) (string, bool) {
+	for k := range params {
+		if _, reserved := reservedParamKeys[strings.ToLower(k)]; reserved {
+			return k, true
+		}
+	}
+	return "", false
+}
 
 // StreamID composes a scope and alias name into the identifier other parts
 // of the control plane (e.g. the Task 7 KV projector's bucket key) use to
@@ -95,6 +139,9 @@ var Decider = es.Decider[*controlplanev1.Alias, *controlplanev1.AliasCommand, *c
 				// target has a non-empty slug, it is itself non-empty, so
 				// that sentinel stays sound.
 				return nil, nil, ErrInvalidTarget
+			}
+			if key, reserved := firstReservedParamKey(k.Set.GetParams()); reserved {
+				return nil, nil, fmt.Errorf("%w: %q", ErrReservedParam, key)
 			}
 			// Upsert: unconditionally emits AliasSet, whether the stream
 			// is fresh, already has a live alias, or was previously
