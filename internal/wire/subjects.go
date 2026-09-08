@@ -2,11 +2,15 @@
 // and harvester: subjects, streams, headers, and message types.
 package wire
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	StreamInference = "INFERENCE"
 	StreamMetering  = "METERING"
+	BucketModels    = "MODELS"
 
 	HdrOrg      = "Ib-Org"
 	HdrProject  = "Ib-Project"
@@ -17,6 +21,9 @@ const (
 	HdrReply    = "Ib-Reply"
 	HdrDeadline = "Ib-Deadline" // RFC3339Nano
 	HdrWorkerID = "Ib-Worker-Id"
+
+	ModelsTTL       = 45 * time.Second
+	ModelsHeartbeat = 15 * time.Second
 )
 
 // Slug maps a model name to a NATS-subject-safe token: lowercase,

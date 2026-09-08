@@ -81,6 +81,29 @@ func TestWorkerRequiresConfig(t *testing.T) {
 	}
 }
 
+// TestWorkerRequiresConfigOrEngine: neither -config nor -engine given must
+// be a usage error (exit 2), not a runtime error further down the line.
+func TestWorkerRequiresConfigOrEngine(t *testing.T) {
+	var out bytes.Buffer
+	code := run([]string{"worker"}, &out)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; output = %q", code, out.String())
+	}
+	if !strings.Contains(out.String(), "-config") || !strings.Contains(out.String(), "-engine") {
+		t.Fatalf("output %q should mention both -config and -engine", out.String())
+	}
+}
+
+// TestWorkerConfigAndEngineMutuallyExclusive: -config and -engine together
+// is ambiguous (which one wins?) — must also be a usage error (exit 2).
+func TestWorkerConfigAndEngineMutuallyExclusive(t *testing.T) {
+	var out bytes.Buffer
+	code := run([]string{"worker", "-config", "/dev/null", "-engine", "http://127.0.0.1:0"}, &out)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; output = %q", code, out.String())
+	}
+}
+
 func TestControlplaneRequiresConfig(t *testing.T) {
 	var out bytes.Buffer
 	if code := run([]string{"controlplane"}, &out); code == 0 {
@@ -106,7 +129,7 @@ func TestHarvesterRequiresConfig(t *testing.T) {
 // returns instead of hanging forever.
 func serveHarvesterResult(ctx context.Context, out *bytes.Buffer, comps ...harvesterComponent) <-chan int {
 	res := make(chan int, 1)
-	go func() { res <- serveHarvester(ctx, "127.0.0.1:0", out, comps...) }()
+	go func() { res <- serveHarvester(ctx, "127.0.0.1:0", out, nil, comps...) }()
 	return res
 }
 

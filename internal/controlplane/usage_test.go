@@ -58,7 +58,7 @@ func newUsageTestAdmin(t *testing.T, cfg Config, verifier TokenVerifier, orgID, 
 			t.Fatalf("seed member: %v", err)
 		}
 	}
-	return NewAdmin(NewAuthenticator(cfg, verifier), rs, nil, nil, nil, func(context.Context) error { return nil }, nil, usage)
+	return NewAdmin(NewAuthenticator(cfg, verifier), rs, nil, nil, nil, func(context.Context) error { return nil }, nil, usage, nil)
 }
 
 func TestAdmin_Usage_MemberGetsBuckets(t *testing.T) {

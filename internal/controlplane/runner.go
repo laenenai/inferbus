@@ -298,7 +298,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	authenticator := NewAuthenticator(r.cfg, verifier)
 
-	admin := NewAdmin(authenticator, rs, orgRT, keyRT, aliasRT, resyncFn, h.ok, usageReader)
+	admin := NewAdmin(authenticator, rs, orgRT, keyRT, aliasRT, resyncFn, h.ok, usageReader, r.js)
 	mux := admin.Routes()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

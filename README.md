@@ -36,8 +36,9 @@ the client as SSE. Workers also emit per-request usage events onto a
 - **Metering built in** — every request (success, error, or cancel) emits a
   usage event with tokens, TTFT, queue time, and provider attribution.
 
-**Status:** pre-alpha (M4 — data path, control plane, and usage pipeline
-shipped). See [docs/design.md](docs/design.md)
+**Status:** v0.1.0 — M1 through M5 shipped (data path, control plane, usage
+pipeline, and hardening: admission control, worker fleet visibility,
+Prometheus metrics). See [docs/design.md](docs/design.md)
 for the full design spec and milestone plan, and
 [docs/design/console-mock](docs/design/console-mock) for the management
 console design (Design Component artboards for the planned v2 console).
@@ -115,10 +116,47 @@ rejects further requests from an exhausted key with `402`. See
 | Static YAML keys/aliases | done |
 | Postgres control plane + KV alias projection | done — [see design-controlplane.md](docs/design-controlplane.md) |
 | Harvester + ClickHouse usage pipeline + budget enforcement | done — [see design-usage.md](docs/design-usage.md) |
-| Admission control / priority tiers | planned (M5 / v1.5) |
+| Admission control (per-model backlog, 429 shedding) | done — see [Admission control](#admission-control-optional) below |
+| Worker fleet visibility (`MODELS` KV, `GET /admin/v1/workers`) | done |
+| Prometheus `/metrics` (gateway, harvester) | done — see [Observability](#observability) below |
+| Priority tiers | planned (v1.5) |
 | OIDC admin API + console | planned (v2) |
 
 ## Quickstart
+
+The fastest way to point inferbus at a model you already have running
+locally (e.g. [Ollama](https://ollama.com)) is a zero-config worker: no
+YAML, no control plane. With NATS and a gateway already up, start a worker
+that discovers its models by asking the engine:
+
+```sh
+inferbus worker -engine http://localhost:11434
+```
+
+The worker calls `GET http://localhost:11434/v1/models` at startup, builds
+one `openai_http` model entry per id it returns — keeping each id **exactly
+as the engine reports it** (`llama3.2:latest`, `meta-llama/Llama-3.2-1B-Instruct`);
+NATS subject names are derived from the id, never the other way round — and
+connects to `nats://127.0.0.1:4222` by default. Override with `-nats`, and
+cap per-model concurrency with `-max-inflight` (default 4). Only two kinds
+of id are skipped, each with a warning: one with no subject-safe form at
+all (punctuation only), and one colliding with an earlier id on its derived
+subject (the first id listed keeps it). There is no live reload: adding or
+removing models at the engine requires restarting the worker. This mode has
+no control plane, so it needs a gateway running in `iam.mode: static`
+(`deploy/gateway.example.yaml`) for keys/aliases.
+
+Aliases gate reachability, so the alias a client calls must target the id
+exactly as the engine reports it:
+
+```yaml
+aliases:
+  fast: "llama3.2:latest"
+```
+
+For the full stack — gateway, worker, control plane, and harvester, wired
+together and ready for the budgets and control-plane walkthroughs below —
+use the compose file instead:
 
 ```sh
 docker compose -f deploy/docker-compose.yaml up -d --build
@@ -175,14 +213,14 @@ curl -X POST http://localhost:8081/admin/v1/orgs/acme/projects \
   -d '{"id":"default","name":"Default"}'
 ```
 
-4. Set an alias. The target must be NATS-subject-safe (lowercase
-`[a-z0-9-]`), which is the same token a worker's model name resolves to —
-so a worker serving `llama3.2` is reached by the target `llama3-2`:
+4. Set an alias. The target is the model name exactly as the worker
+serves it (the engine's own id — e.g. Ollama's `llama3.2:latest`); both
+sides derive the same NATS subject from it, so no manual slugging:
 ```sh
 curl -X PUT http://localhost:8081/admin/v1/aliases/acme/fast \
   -H "Authorization: Bearer dev_admin_change_me" \
   -H "Content-Type: application/json" \
-  -d '{"target":"llama3-2"}'
+  -d '{"target":"llama3.2:latest"}'
 ```
 
 5. Create an API key:
@@ -203,6 +241,20 @@ curl "http://localhost:8081/admin/v1/usage?org=acme&window=7d" \
 ```
 `window` is one of `24h`, `7d`, `30d`; the response buckets an org's usage by
 model, alias, provider, and status.
+
+7. List the worker fleet (platform admins only — the caller's bootstrap or
+OIDC identity must carry `PlatformAdmin`, since this is a system-wide view
+across every org's traffic):
+```sh
+curl http://localhost:8081/admin/v1/workers \
+  -H "Authorization: Bearer dev_admin_change_me"
+```
+The response is a snapshot of the `MODELS` NATS KV bucket — every worker
+that has heartbeated in the last 45s, with its `worker_id`, the models it
+serves, `started_at`, and `last_seen`. It's best-effort presence, not a
+live health check: a worker that stops heartbeating simply ages out of the
+bucket (and this list) after its TTL, indistinguishable here from a worker
+that was never told to stop cleanly.
 
 **Static mode (no control plane).** To run the gateway against a checked-in
 YAML key list instead, mount `deploy/gateway.example.yaml` in the compose
@@ -257,6 +309,58 @@ the next ledger flush plus gateway KV-watch propagation may still succeed.
 Static mode has no budget enforcement — there is no `BUDGETS` projection to
 watch.
 
+## Admission control (optional)
+
+Disabled by default. When a model's backlog gets ahead of what its workers
+can drain, the gateway can shed load with `429` instead of queuing a
+request behind work that won't be reached in time. Enable it in the
+gateway config:
+
+```yaml
+admission:
+  max_backlog: 32          # reject once a model's queue holds this many
+                            # entries. 0 (the default) disables the feature.
+  retry_after_seconds: 2   # Retry-After on the 429 (defaults to 2 once
+                            # max_backlog or overrides is set).
+  overrides:                # per-model limits, keyed by the CONCRETE model
+    llama3.2: 8              # name (the alias target). 0 exempts a model.
+    embed-small: 0
+```
+
+A model's backlog is its durable JetStream consumer's `NumPending +
+NumAckPending`, read on demand and cached per model for one second so a
+burst costs one JetStream lookup, not one per request. The check fails
+open: an unreachable JetStream, a slow consumer-info fetch, or a model with
+no consumer yet (no worker has ever started for it) all admit the request
+rather than reject it — admission control is a backpressure signal, not a
+correctness gate. A rejected request gets:
+
+```json
+{"error":{"type":"overloaded","message":"model queue is full, retry later"}}
+```
+
+with a `Retry-After` header. Setting `overrides` without `max_backlog`
+doesn't enable admission control (there's nothing to fall back to) — the
+gateway logs a startup warning rather than silently ignoring it.
+
+## Observability
+
+The gateway and the harvester each serve Prometheus metrics on their own
+`/metrics` — the worker and the control plane expose none.
+
+| Service | Endpoint | Metrics |
+|---|---|---|
+| gateway | `GET :8080/metrics` | `inferbus_requests_total{route,code}`, `inferbus_admission_rejected_total{model}`, `inferbus_inflight_requests` |
+| harvester | `GET :8082/metrics` | `inferbus_usage_rows_inserted_total`, `inferbus_insert_failures_total`, `inferbus_budget_entries{state}` |
+
+A starter Grafana dashboard for the ClickHouse usage data (separate from
+these Prometheus metrics) ships at
+[`deploy/grafana-usage.json`](deploy/grafana-usage.json) — tokens/hour by
+model, requests/hour by alias, and error rate, all queried from
+`usage_events`. Import it into Grafana and point its `DS_CLICKHOUSE`
+template variable at a ClickHouse datasource for the compose stack's
+database.
+
 ## Configuration
 
 Gateway — the compose stack uses `deploy/gateway.kv.example.yaml` (control
@@ -283,7 +387,11 @@ what a worker must have configured to serve. Requesting a concrete model name
 directly (bypassing its alias) is a 404 unless that name is also an alias.
 
 Worker (`deploy/worker.example.yaml`) — no database, no control-plane access,
-just NATS and per-model engine config:
+just NATS and per-model engine config. For a single `openai_http` engine
+with no per-model tuning, skip the YAML entirely and run
+`inferbus worker -engine <url>` (see Quickstart above) — the YAML config
+below is for explicit per-model settings (mixed engines, `bifrost`,
+non-default `max_inflight`) that discovery can't express:
 
 ```yaml
 worker_id: gpu-node-01
@@ -390,7 +498,7 @@ on every push and pull request.
 |---|---|
 | **M3** | ✅ shipped — Control plane: event-sourced on [es-lite](https://github.com/laenenai/es-lite) with orgs/projects/keys/aliases, admin API, NATS KV projections watched live by gateways, OIDC — see [docs/design-controlplane.md](docs/design-controlplane.md) |
 | **M4** | ✅ shipped — Usage pipeline: `harvester` consuming `METERING` into ClickHouse; budget ledger + gateway `402` enforcement via `BUDGETS` KV — see [docs/design-usage.md](docs/design-usage.md) |
-| **M5** | Hardening: admission control from queue depth, request logging/metrics, docs |
+| **M5** | ✅ shipped — Hardening: admission control from queue depth, `MODELS` KV worker presence + fleet listing, zero-config worker, Prometheus `/metrics`, docs, first public release (v0.1.0) — see [Admission control](#admission-control-optional) and [Observability](#observability) above |
 | **v1.5** | Priority tiers, claim-check for large payloads |
 | **v2** | Management console (see [the design mock](docs/design/console-mock)) |
 

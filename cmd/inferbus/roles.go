@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -150,18 +151,44 @@ func runGateway(args []string, stdout io.Writer) int {
 func runWorker(args []string, stdout io.Writer) int {
 	fs := flag.NewFlagSet("worker", flag.ContinueOnError)
 	fs.SetOutput(stdout)
-	cfgPath := fs.String("config", "", "path to worker YAML config (required)")
+	cfgPath := fs.String("config", "", "path to worker YAML config")
+	engineURL := fs.String("engine", "", "zero-config: OpenAI-compatible engine base URL (discovers models via /v1/models)")
+	natsURL := fs.String("nats", "nats://127.0.0.1:4222", "NATS URL (zero-config mode)")
+	maxInflight := fs.Int("max-inflight", 4, "per-model concurrency (zero-config mode)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *cfgPath == "" {
-		fmt.Fprintln(stdout, "worker: -config is required")
+	if (*cfgPath == "") == (*engineURL == "") {
+		fmt.Fprintln(stdout, "worker: exactly one of -config or -engine is required")
 		return 2
 	}
-	cfg, err := worker.LoadConfig(*cfgPath)
-	if err != nil {
-		fmt.Fprintln(stdout, "worker:", err)
-		return 1
+
+	var cfg worker.Config
+	var err error
+	if *cfgPath != "" {
+		cfg, err = worker.LoadConfig(*cfgPath)
+		if err != nil {
+			fmt.Fprintln(stdout, "worker:", err)
+			return 1
+		}
+	} else {
+		// Zero-config mode: ask the engine what it serves instead of
+		// requiring an operator to hand-write a per-model YAML config.
+		// Bounded so a misbehaving/unreachable engine fails fast at
+		// startup rather than hanging indefinitely.
+		discoverCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cfg, err = worker.Discover(discoverCtx, *engineURL, *maxInflight)
+		cancel()
+		if err != nil {
+			fmt.Fprintln(stdout, "worker:", err)
+			return 1
+		}
+		cfg.NATSURL = *natsURL
+		names := make([]string, len(cfg.Models))
+		for i, m := range cfg.Models {
+			names[i] = m.Name
+		}
+		fmt.Fprintf(stdout, "worker: discovered %d model(s) from %s: %s\n", len(cfg.Models), *engineURL, strings.Join(names, ", "))
 	}
 	nc, js, err := connect(cfg.NATSURL, "worker")
 	if err != nil {
@@ -293,10 +320,15 @@ func runHarvester(args []string, stdout io.Writer) int {
 	h := harvester.New(nc, js, sink, cfg)
 	ledger := harvester.NewBudgetLedger(js, sink, cfg.BudgetRefreshInterval)
 
-	// Wire the harvester's OnRow to the ledger's AddUsage.
+	// Wire the harvester's OnRow to the ledger's AddUsage, and the ledger's
+	// budget_entries flush path back to the harvester's own gauge — metrics
+	// live on the Harvester instance (Task 6 / ADR-0028), and this is the
+	// seam that lets the ledger report into it without either depending on
+	// the other's concrete type.
 	h.OnRow(ledger.AddUsage)
+	ledger.SetBudgetGaugeFunc(h.SetBudgetEntries)
 
-	return serveHarvester(ctx, cfg.Addr, stdout,
+	return serveHarvester(ctx, cfg.Addr, stdout, h.Handler(),
 		harvesterComponent{name: "harvester", run: h.Run},
 		harvesterComponent{name: "budget-ledger", run: ledger.Run},
 	)
@@ -323,7 +355,11 @@ type harvesterComponent struct {
 // deferred sink/NATS cleanup and never exiting non-zero for a supervisor
 // to restart. cancelRun is called on EVERY exit path, before wg.Wait(), so
 // the surviving components are always told to stop.
-func serveHarvester(ctx context.Context, addr string, stdout io.Writer, comps ...harvesterComponent) int {
+// metricsHandler serves the harvester role's Prometheus metrics (Task 6 /
+// ADR-0028); nil is a safe no-op — /metrics answers 404, same as any other
+// unrecognized path — which lets tests that don't care about metrics (e.g.
+// the shutdown/fail-fast supervisor tests) omit it.
+func serveHarvester(ctx context.Context, addr string, stdout io.Writer, metricsHandler http.Handler, comps ...harvesterComponent) int {
 	// runCtx is a child of ctx that can be canceled independently when
 	// either component fails fatally, allowing graceful HTTP shutdown.
 	runCtx, cancelRun := context.WithCancel(ctx)
@@ -378,6 +414,8 @@ func serveHarvester(ctx context.Context, addr string, stdout io.Writer, comps ..
 				}
 				w.WriteHeader(http.StatusOK)
 				fmt.Fprint(w, "OK")
+			} else if r.URL.Path == "/metrics" && metricsHandler != nil {
+				metricsHandler.ServeHTTP(w, r)
 			} else {
 				w.WriteHeader(http.StatusNotFound)
 			}

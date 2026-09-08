@@ -139,6 +139,7 @@ func startControlPlane(t *testing.T, bootstrapToken string) *controlPlaneStack {
 		func(context.Context) error { return nil }, // resync: unused by this test
 		func() bool { return true },                // healthy: unused by this test
 		nil,                                        // usage: unused by this test
+		js,
 	)
 
 	adminSrv := httptest.NewServer(admin.Routes())

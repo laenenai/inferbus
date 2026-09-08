@@ -54,6 +54,9 @@ func TestExampleConfigParses(t *testing.T) {
 	if cfg.IAM.Mode != "static" {
 		t.Errorf("IAM.Mode = %q, want %q (default, no iam: block in the example)", cfg.IAM.Mode, "static")
 	}
+	if cfg.Admission.MaxBacklog != 0 {
+		t.Errorf("Admission.MaxBacklog = %d, want 0 (the admission block is commented out)", cfg.Admission.MaxBacklog)
+	}
 }
 
 // TestConfigDefaultsToStaticIAM covers I3's config-parsing requirement: a
@@ -109,5 +112,46 @@ func TestKVExampleConfigParses(t *testing.T) {
 	}
 	if cfg.RequestTimeout != 5*time.Minute {
 		t.Errorf("RequestTimeout = %v, want 5m", cfg.RequestTimeout)
+	}
+	if cfg.Admission.MaxBacklog != 0 {
+		t.Errorf("Admission.MaxBacklog = %d, want 0 (the admission block is commented out)", cfg.Admission.MaxBacklog)
+	}
+}
+
+// TestAdmissionConfigDefaults covers the one default LoadConfig applies to
+// the admission block: an operator who turns admission control on without
+// naming a Retry-After still gets a usable one (2s) rather than a
+// "Retry-After: 0" that invites an instant hot-loop retry.
+func TestAdmissionConfigDefaults(t *testing.T) {
+	path := writeConfig(t, "admission:\n  max_backlog: 32\n")
+	cfg, err := gateway.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Admission.MaxBacklog != 32 {
+		t.Errorf("Admission.MaxBacklog = %d, want 32", cfg.Admission.MaxBacklog)
+	}
+	if cfg.Admission.RetryAfterSeconds != 2 {
+		t.Errorf("Admission.RetryAfterSeconds = %d, want the 2s default", cfg.Admission.RetryAfterSeconds)
+	}
+}
+
+// TestAdmissionConfigParsesOverrides: an explicit retry_after_seconds is not
+// overwritten by the default, and per-model overrides are keyed by the
+// CONCRETE model name (post-alias-resolution), not by alias.
+func TestAdmissionConfigParsesOverrides(t *testing.T) {
+	path := writeConfig(t, "admission:\n  max_backlog: 32\n  retry_after_seconds: 9\n  overrides:\n    llama3.2: 8\n    embed-small: 0\n")
+	cfg, err := gateway.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Admission.RetryAfterSeconds != 9 {
+		t.Errorf("Admission.RetryAfterSeconds = %d, want 9", cfg.Admission.RetryAfterSeconds)
+	}
+	if got, want := cfg.Admission.Overrides["llama3.2"], 8; got != want {
+		t.Errorf("Overrides[llama3.2] = %d, want %d", got, want)
+	}
+	if got, ok := cfg.Admission.Overrides["embed-small"]; !ok || got != 0 {
+		t.Errorf("Overrides[embed-small] = %d (present=%v), want 0 present", got, ok)
 	}
 }

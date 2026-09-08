@@ -146,6 +146,16 @@ type BudgetLedger struct {
 	entries            map[string]*ledgerRow
 	dirty              map[string]bool // key ids with in-memory state not yet reflected in BUDGETS
 
+	// budgetGaugeFn, if non-nil, is invoked once per flushTick with the
+	// ledger's current live-entry counts broken down by ok/exceeded state
+	// (see reportBudgetGauge) — the seam a Harvester wires via
+	// SetBudgetGaugeFunc(h.SetBudgetEntries) so metrics live on the
+	// Harvester instance while the ledger stays otherwise metrics-agnostic.
+	// nil (the default) is a safe no-op: every pre-existing BudgetLedger
+	// test, and any standalone use of the type, never calls
+	// SetBudgetGaugeFunc at all.
+	budgetGaugeFn func(ok, exceeded int)
+
 	// testAfterKVOp, if non-nil, is invoked synchronously by flushOne
 	// immediately after its KV Put/Delete call returns (success or
 	// failure) but before flushOne re-locks to reconcile the ledger's
@@ -212,6 +222,45 @@ func (l *BudgetLedger) getRebaselineInterval() time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.rebaselineInterval
+}
+
+// SetBudgetGaugeFunc registers fn to be called once per flush tick
+// (flushTick, via reportBudgetGauge) with the ledger's current count of
+// live entries in "ok" state and in "exceeded" state. fn is always called
+// with a full, authoritative snapshot — Set semantics, never
+// increment/decrement — so the resulting gauge can never drift from
+// repeated Inc/Dec calls racing rebaselines, rollovers, or KEYS updates.
+// Optional: nil (the default) is a safe no-op. Call before Run, mirroring
+// SetNowFn/SetRebaselineInterval.
+func (l *BudgetLedger) SetBudgetGaugeFunc(fn func(ok, exceeded int)) {
+	l.mu.Lock()
+	l.budgetGaugeFn = fn
+	l.mu.Unlock()
+}
+
+// reportBudgetGauge recomputes the ledger's live (non-toDelete) entries
+// broken down by ok/exceeded and reports the result via budgetGaugeFn, if
+// one is registered. Deliberately independent of flushOne/l.kv/l.runCtx —
+// unlike publishing to BUDGETS, reporting this in-memory count needs no
+// I/O and so can never be blocked by a wedged sink or KV store.
+func (l *BudgetLedger) reportBudgetGauge() {
+	l.mu.Lock()
+	fn := l.budgetGaugeFn
+	var ok, exceeded int
+	for _, row := range l.entries {
+		if row.toDelete {
+			continue
+		}
+		if row.exceeded {
+			exceeded++
+		} else {
+			ok++
+		}
+	}
+	l.mu.Unlock()
+	if fn != nil {
+		fn(ok, exceeded)
+	}
 }
 
 // AddUsage is wired to Harvester.OnRow: it must stay fast and
@@ -837,6 +886,7 @@ func (l *BudgetLedger) flushTick() {
 		l.flushOne(id)
 	}
 	l.loadBaselines(pending, true)
+	l.reportBudgetGauge()
 }
 
 // checkMonthRollover compares the wall-clock month (via nowFn) against the

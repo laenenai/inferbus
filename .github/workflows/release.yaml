@@ -1,0 +1,65 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race)
+        run: go test ./... -race
+
+  create-release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Idempotent: `gh release create` fails with "a release with the same
+      # tag name already exists", and because `build` needs this job, that
+      # failure would block a re-run from ever reaching the binaries — the
+      # exact recovery path a flaky matrix leg or a transient upload error
+      # calls for. Creating only when the release is absent makes
+      # "Re-run failed jobs" work. Uploads below are already --clobber, so
+      # the whole workflow is safe to re-run end to end.
+      - name: Create GitHub release if absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --generate-notes
+
+  build:
+    needs: create-release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          out="inferbus_${GOOS}_${GOARCH}"
+          go build -trimpath -ldflags "-s -w" -o "$out" ./cmd/inferbus
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload --clobber "$GITHUB_REF_NAME" "inferbus_${{ matrix.goos }}_${{ matrix.goarch }}"

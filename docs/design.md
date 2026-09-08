@@ -225,7 +225,7 @@ inferbus/
 2. **M2 — Data path:** gateway (key auth, static aliases) → worker (Bifrost, one provider) → SSE; e2e streaming test green.
 3. **M3 — Control plane:** Postgres schema, admin API, KV alias projection, OIDC on admin routes.
 4. **M4 — Usage:** worker usage events, harvester, ClickHouse schema, budget enforcement. Grafana starter dashboard: planned, not built.
-5. **M5 — Hardening + launch:** admission control, cancel/redelivery e2e, docs, console mockup, first public release.
+5. **M5 — Hardening + launch:** built — admission control, `MODELS` KV worker presence + fleet listing, zero-config worker, Prometheus `/metrics` on gateway and harvester, cancel/redelivery e2e, docs, console mockup ([docs/design/console-mock](design/console-mock)), first public release. Grafana starter: shipped in `deploy/grafana-usage.json`.
 6. **V1.5:** priority tiers, claim-check blobs, shared rate counters. **V2:** functional console.
 
 ## 17. Open questions

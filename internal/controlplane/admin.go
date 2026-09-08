@@ -48,6 +48,7 @@ import (
 	"github.com/laenenai/inferbus/internal/wire"
 
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/laenenai/es-lite/aggregate"
 	"github.com/laenenai/es-lite/es"
@@ -86,6 +87,11 @@ type Admin struct {
 	// clickhouse_dsn set (runner.go) never wire one, and getUsage
 	// (usage.go) reports 501 not_configured rather than panicking.
 	usage UsageReader
+	// js is the shared JetStream context, used by listWorkers (workers.go,
+	// M5 Task 5) to read the MODELS KV bucket directly — Admin otherwise
+	// has no NATS handle of its own, since every other read goes through
+	// rs (the SQL ReadStore) or an aggregate.Runtime.
+	js jetstream.JetStream
 }
 
 // NewAdmin wires an Admin. resync is called by POST
@@ -101,8 +107,12 @@ type Admin struct {
 //
 // usage is Task 8's optional ClickHouse-backed usage reader; nil means GET
 // /admin/v1/usage reports 501 not_configured (see usage.go's getUsage).
-func NewAdmin(auth Authenticator, rs ReadStore, orgRT OrgRuntime, keyRT KeyRuntime, aliasRT AliasRuntime, resync func(ctx context.Context) error, healthy func() bool, usage UsageReader) *Admin {
-	return &Admin{auth: auth, rs: rs, orgRT: orgRT, keyRT: keyRT, aliasRT: aliasRT, resync: resync, healthy: healthy, usage: usage}
+//
+// js is the shared JetStream context (M5 Task 5): listWorkers uses it
+// directly to read the MODELS KV bucket. A nil js is only safe for tests
+// that never exercise GET /admin/v1/workers.
+func NewAdmin(auth Authenticator, rs ReadStore, orgRT OrgRuntime, keyRT KeyRuntime, aliasRT AliasRuntime, resync func(ctx context.Context) error, healthy func() bool, usage UsageReader, js jetstream.JetStream) *Admin {
+	return &Admin{auth: auth, rs: rs, orgRT: orgRT, keyRT: keyRT, aliasRT: aliasRT, resync: resync, healthy: healthy, usage: usage, js: js}
 }
 
 // isHealthy is the nil-safe accessor for Admin.healthy.
@@ -138,6 +148,8 @@ func (a *Admin) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /admin/v1/projections/resync", a.resyncProjections)
 
 	mux.HandleFunc("GET /admin/v1/usage", a.getUsage)
+
+	mux.HandleFunc("GET /admin/v1/workers", a.listWorkers)
 
 	// Catch-all: any /admin/v1/* request that doesn't match one of the
 	// patterns above (unknown path, or a known path with the wrong
