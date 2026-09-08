@@ -288,45 +288,72 @@ func runHarvester(args []string, stdout io.Writer) int {
 	// Wire the harvester's OnRow to the ledger's AddUsage.
 	h.OnRow(ledger.AddUsage)
 
+	return serveHarvester(ctx, cfg.Addr, stdout,
+		harvesterComponent{name: "harvester", run: h.Run},
+		harvesterComponent{name: "budget-ledger", run: ledger.Run},
+	)
+}
+
+// harvesterComponent is one long-running subsystem supervised by
+// serveHarvester: the METERING consumer/batcher, or the budget ledger.
+type harvesterComponent struct {
+	name string
+	run  func(context.Context) error
+}
+
+// serveHarvester supervises the harvester role's components behind its
+// healthz/readyz HTTP server until ctx is cancelled, a component dies, or
+// the HTTP server itself fails; it returns the process exit code.
+//
+// C1 (final review): each component goroutine CLOSES its done channel on
+// exit and only ever sends a value for a genuinely fatal error —
+// context.Canceled (what both components return on an ordinary shutdown)
+// is a clean exit, not a failure. The watchers range over those channels,
+// so they terminate on close as well as on a value; without that, every
+// shutdown path (SIGTERM, compose down, a rolling update) and the
+// fail-fast path below deadlocked forever on wg.Wait(), never running the
+// deferred sink/NATS cleanup and never exiting non-zero for a supervisor
+// to restart. cancelRun is called on EVERY exit path, before wg.Wait(), so
+// the surviving components are always told to stop.
+func serveHarvester(ctx context.Context, addr string, stdout io.Writer, comps ...harvesterComponent) int {
 	// runCtx is a child of ctx that can be canceled independently when
 	// either component fails fatally, allowing graceful HTTP shutdown.
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
-	// Channels to report non-context errors from components.
-	hDone := make(chan error, 1)
-	ledgerDone := make(chan error, 1)
-
-	go func() {
-		if err := h.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
-			hDone <- err
-		}
-	}()
-
-	go func() {
-		if err := ledger.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
-			ledgerDone <- err
-		}
-	}()
-
-	// Health check: both components running.
+	// failedCh is closed the first time any component reports a fatal
+	// (non-context) error; it drives both /readyz and the fail-fast path.
 	failedCh := make(chan struct{})
 	var once sync.Once
-	watch := func(done <-chan error, name string) {
-		if err := <-done; err != nil {
-			slog.Error("harvester: component failed", "component", name, "err", err)
-			once.Do(func() { close(failedCh) })
-		}
-	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); watch(hDone, "harvester") }()
-	go func() { defer wg.Done(); watch(ledgerDone, "budget-ledger") }()
+	for _, c := range comps {
+		done := make(chan error, 1)
+		wg.Add(1)
+		go func() {
+			defer close(done)
+			if err := c.run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+				done <- err
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			// Ranges to completion: a closed-without-a-value channel is a
+			// clean component shutdown.
+			for err := range done {
+				if err == nil {
+					continue
+				}
+				slog.Error("harvester: component failed", "component", c.name, "err", err)
+				once.Do(func() { close(failedCh) })
+			}
+		}()
+	}
 
 	// Start HTTP server for healthz/readyz.
 	srv := &http.Server{
-		Addr: cfg.Addr,
+		Addr:              addr,
+		ReadHeaderTimeout: 10 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/healthz" {
 				w.WriteHeader(http.StatusOK)
@@ -352,20 +379,28 @@ func runHarvester(args []string, stdout io.Writer) int {
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- srv.ListenAndServe() }()
 
+	// httpDown guards the single drain of srvErr: shutdownHTTP blocks on it,
+	// so it must not run again once ListenAndServe's result was consumed
+	// (either by shutdownHTTP itself or by the select below).
+	httpDown := false
 	shutdownHTTP := func() {
+		if httpDown {
+			return
+		}
+		httpDown = true
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 		<-srvErr
 	}
 
-	fmt.Fprintf(stdout, "harvester listening on %s\n", cfg.Addr)
+	fmt.Fprintf(stdout, "harvester listening on %s\n", addr)
 
 	var runErr error
 	select {
 	case <-ctx.Done():
-		shutdownHTTP()
 	case e := <-srvErr:
+		httpDown = true // ListenAndServe's result is already consumed.
 		if e != nil && e != http.ErrServerClosed {
 			runErr = e
 		}
@@ -374,19 +409,13 @@ func runHarvester(args []string, stdout io.Writer) int {
 		// The prior log line via slog.Error names which component and why.
 		slog.Error("harvester: component failure; shutting down")
 		runErr = errors.New("harvester: component failed (see prior log line for the cause)")
-		shutdownHTTP()
-		cancelRun()
 	}
 
-	// Wait for component watchers to finish.
+	// Stop the components and the HTTP server on every exit path, then wait
+	// for the component watchers to observe their channels close.
+	cancelRun()
+	shutdownHTTP()
 	wg.Wait()
-
-	// Cleanup: shutdown HTTP if not already done.
-	select {
-	case <-srvErr:
-	default:
-		shutdownHTTP()
-	}
 
 	if runErr != nil {
 		fmt.Fprintln(stdout, runErr)
