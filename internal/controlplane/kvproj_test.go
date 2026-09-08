@@ -810,3 +810,90 @@ func TestKVProjectors_FailStop(t *testing.T) {
 		t.Fatalf("ALIASES bucket keys after fail-stop = %v, want none", keys)
 	}
 }
+
+// TestKVProjectors_LimitsChangeBackfillsIdOnPreM4Entry is the regression
+// test for final-review I2: a KEYS entry projected before M4 added
+// KeyEntry.Id decodes with Id == "", and the harvester's budget ledger
+// skips every such entry — so setting a monthly budget on a pre-M4 key
+// used to be a silent, permanent no-op (the entry got the budget but never
+// an Id, so no BUDGETS entry was ever written and the key spent without
+// limit). The LimitsChanged arm now backfills Id from the aggregate id it
+// already has in scope.
+//
+// The pre-M4 state is simulated the only way it can occur in practice: the
+// KEYS entry in KV carries the budget but no Id, exactly as an M3-era
+// projection left it.
+func TestKVProjectors_LimitsChangeBackfillsIdOnPreM4Entry(t *testing.T) {
+	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	defer cancelRelay()
+	env := setupKVProjTest(t, relayCtx)
+
+	rt := aggregate.NewRuntime(env.store, apikey.Decider, apikey.Codec())
+	stream, err := es.NewStreamID(apikey.StreamType, "key-legacy")
+	if err != nil {
+		t.Fatalf("stream id: %v", err)
+	}
+	const hash = "3333333333333333333333333333333333333333333333333333333333333333"
+
+	if _, err := rt.Handle(context.Background(), stream, &controlplanev1.ApiKeyCommand{
+		Kind: &controlplanev1.ApiKeyCommand_Create{Create: &controlplanev1.CreateKey{
+			Id: "key-legacy", Org: "acme", Project: "proj-1", Name: "legacy",
+			Hash: hash, Allow: []string{"gpt-4"}, RateLimitRpm: 60,
+		}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	projCtx, cancelProj := context.WithCancel(context.Background())
+	defer cancelProj()
+	projDone := make(chan error, 1)
+	go func() { projDone <- controlplane.RunKVProjectors(projCtx, env.store, env.js) }()
+	t.Cleanup(func() {
+		cancelProj()
+		select {
+		case <-projDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("RunKVProjectors did not stop")
+		}
+	})
+
+	keysKV := waitForBucket(t, env.js, controlplane.BucketKeys)
+	waitForKV(t, func() (bool, error) {
+		_, ok := getKeyEntry(t, keysKV, hash)
+		return ok, nil
+	})
+
+	// Rewrite the entry as an M3-era projector would have: no Id field.
+	legacy := controlplane.KeyEntry{Org: "acme", Project: "proj-1", Name: "legacy", Allow: []string{"gpt-4"}, RateLimitRPM: 60}
+	b, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keysKV.Put(context.Background(), hash, b); err != nil {
+		t.Fatalf("put pre-M4 entry: %v", err)
+	}
+	if e, _ := getKeyEntry(t, keysKV, hash); e.Id != "" {
+		t.Fatalf("pre-M4 fixture entry = %+v, want empty Id", e)
+	}
+
+	// The operator sets a monthly budget on that key.
+	if _, err := rt.Handle(context.Background(), stream, &controlplanev1.ApiKeyCommand{
+		Kind: &controlplanev1.ApiKeyCommand_SetLimits{SetLimits: &controlplanev1.SetLimits{
+			RateLimitRpm: 60, MonthlyTokenBudget: 100000,
+		}},
+	}, es.Meta{}); err != nil {
+		t.Fatalf("set limits: %v", err)
+	}
+
+	waitForKV(t, func() (bool, error) {
+		e, ok := getKeyEntry(t, keysKV, hash)
+		return ok && e.MonthlyTokenBudget == 100000, nil
+	})
+	entry, _ := getKeyEntry(t, keysKV, hash)
+	if entry.Id != "key-legacy" {
+		t.Fatalf("entry after limits change = %+v, want Id backfilled to key-legacy (without it the budget ledger skips the key forever)", entry)
+	}
+	if entry.MonthlyTokenBudget != 100000 || entry.Org != "acme" || entry.Project != "proj-1" {
+		t.Fatalf("entry after limits change = %+v, want budget 100000 and the pre-existing org/project preserved", entry)
+	}
+}

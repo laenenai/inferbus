@@ -405,12 +405,22 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 			return err
 		}
 		if !ok {
-			// Defensive: Created always precedes Rotated for a valid
-			// aggregate stream, so this should be unreachable, but a
-			// missing previous entry must never fail the projector —
-			// synthesize a minimal one rather than losing the key.
-			entry = KeyEntry{}
+			// Final review M15: fail-stop, consistent with the
+			// AllowlistChanged/LimitsChanged arms below (C2 ruling).
+			// Synthesizing KeyEntry{} here would Put a live key hash whose
+			// entry has an empty Org/Project/Allow — an authenticated
+			// identity in a nonexistent tenant, budget-exempt because it
+			// also has no Id. Created always precedes Rotated for a valid
+			// stream (and the decider refuses to rotate a disabled key), so
+			// a missing previous entry is an invariant violation, not a
+			// normal case to paper over.
+			return fmt.Errorf("controlplane: keys projector: rotate for key id %q: no KEYS entry under previous hash %q (invariant violation)", id, r.GetPreviousHash())
 		}
+		// Final review I2: backfill Id on every read-modify-write arm, so a
+		// KEYS entry projected before M4 introduced KeyEntry.Id gains one as
+		// soon as anything touches it (the budget ledger skips entries with
+		// an empty Id).
+		entry.Id = id
 		if err := p.put(ctx, r.GetNewHash(), entry); err != nil {
 			return err
 		}
@@ -444,6 +454,7 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 			// under a real key's hash. Fail-stop instead.
 			return fmt.Errorf("controlplane: keys projector: allowlist change for key id %q: no KEYS entry under hash %q (invariant violation)", id, hash)
 		}
+		entry.Id = id // I2: backfill — see the Rotated arm above.
 		entry.Allow = k.AllowlistChanged.GetAllow()
 		return p.put(ctx, hash, entry)
 
@@ -469,6 +480,12 @@ func (p *keysProjector) applyOne(ctx context.Context, e es.Envelope) error {
 			// Put a phantom entry.
 			return fmt.Errorf("controlplane: keys projector: limits change for key id %q: no KEYS entry under hash %q (invariant violation)", id, hash)
 		}
+		// I2 (final review): without this backfill, setting a budget on a
+		// pre-M4 KEYS entry (projected before KeyEntry gained Id) was a
+		// silent permanent no-op — the entry carried the budget, but the
+		// budget ledger skips every entry with an empty Id, so the key
+		// never got a BUDGETS entry and never hit 402.
+		entry.Id = id
 		entry.RateLimitRPM = int(k.LimitsChanged.GetRateLimitRpm())
 		entry.MonthlyTokenBudget = k.LimitsChanged.GetMonthlyTokenBudget()
 		return p.put(ctx, hash, entry)

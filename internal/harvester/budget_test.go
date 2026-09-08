@@ -566,3 +566,38 @@ func TestBudgetLedger_MonthRolloverWithFailingMonthToDate_NoStalePutThenRecovers
 		return ok && e.Used == 42 && e.Month == "2026-10"
 	})
 }
+
+// TestBudgetLedger_PreM4EntryGainsIdOnLimitsChange is the ledger half of
+// final-review I2. A KEYS entry projected before M4 introduced
+// KeyEntry.Id carries no Id, so the ledger has nothing to key a BUDGETS
+// entry by and skips it — even when the operator sets a budget on it. The
+// control-plane fix backfills Id on every read-modify-write arm; this
+// asserts the ledger then picks the key up (BUDGETS entry appears with the
+// budget) without any restart or resync.
+func TestBudgetLedger_PreM4EntryGainsIdOnLimitsChange(t *testing.T) {
+	_, js := testutil.RunNATS(t)
+	keysKV := createKeysBucket(t, js)
+	hash := cpkv.HashKey("plaintext-legacy")
+
+	// Pre-M4 shape: budget set, but no Id (an M3-era projection).
+	putKeyEntry(t, keysKV, hash, cpkv.KeyEntry{Org: "acme", MonthlyTokenBudget: 100000})
+
+	sink := harvester.NewFakeSink()
+	l := harvester.NewBudgetLedger(js, sink, 100*time.Millisecond)
+	l.SetNowFn(func() time.Time { return time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC) })
+	startBudgetLedger(t, l)
+
+	// Nothing can be published for an entry with no Id.
+	time.Sleep(500 * time.Millisecond)
+	if _, ok := getBudgetEntry(t, js, "key-legacy"); ok {
+		t.Fatal("BUDGETS entry exists for a KEYS entry with no Id")
+	}
+
+	// The fixed LimitsChanged arm re-Puts the same hash WITH the Id.
+	putKeyEntry(t, keysKV, hash, cpkv.KeyEntry{Id: "key-legacy", Org: "acme", MonthlyTokenBudget: 100000})
+
+	pollUntil(t, 5*time.Second, func() bool {
+		e, ok := getBudgetEntry(t, js, "key-legacy")
+		return ok && e.Budget == 100000 && e.Month == "2026-09" && !e.Exceeded
+	})
+}
