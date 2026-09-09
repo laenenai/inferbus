@@ -19,6 +19,25 @@ addr: ":8080"
 request_timeout: 5m
 iam:
   mode: kv
+# Embedding aliases with operator-pinned params ("named resolutions") are
+# created through the control plane's admin API, not this file — kv mode's
+# ALIASES entries (including their optional `params` map) live in
+# Postgres/NATS KV, never in static YAML. Example: exposing one embedding
+# model as two aliases that each pin their own vector size, so clients pick
+# a size by alias and never send `dimensions` themselves:
+#
+#   curl -X PUT http://localhost:8081/admin/v1/aliases/acme/embed-hd \
+#     -H "Authorization: Bearer dev_admin_change_me" \
+#     -H "Content-Type: application/json" \
+#     -d '{"target":"nomic-embed-text","params":{"dimensions":"1024"}}'
+#
+#   curl -X PUT http://localhost:8081/admin/v1/aliases/acme/embed-compact \
+#     -H "Authorization: Bearer dev_admin_change_me" \
+#     -H "Content-Type: application/json" \
+#     -d '{"target":"nomic-embed-text","params":{"dimensions":"256"}}'
+#
+# See the README's "Named resolutions" section for the full walkthrough,
+# including the Ollama-vs-vLLM `dimensions` support caveat.
 # admission:
 #   max_backlog: 32          # reject a request when the model's queue already
 #                            # holds this many entries (JetStream consumer

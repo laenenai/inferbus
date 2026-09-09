@@ -37,8 +37,9 @@ metering, and the ClickHouse schema — `wire.UsageEvent.Kind` has documented
   `embed`.
 - Embedding responses use exactly one `wire.KindResult` frame, then the
   reply subject is done. No `chunk`, no `done`. `stream: true` in an
-  embeddings body is rejected by the gateway with 400 (`invalid_request`);
-  the OpenAI embeddings API has no streaming form.
+  embeddings body is rejected by the gateway with 400
+  (`invalid_request_error`); the OpenAI embeddings API has no streaming
+  form.
 - A worker that receives `Ib-Kind: embed` for a model whose engine cannot
   embed returns a `KindError` frame with code `unsupported_kind`, mapped by
   the gateway to 400.

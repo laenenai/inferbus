@@ -8,6 +8,15 @@ keys:
     allow: [fast]
 aliases:
   fast: llama3.2
+  # embed: nomic-embed-text  # an embedding-serving worker's own model id;
+  #                          # POST /v1/embeddings resolves it exactly like
+  #                          # chat resolves "fast" above.
+  #
+  # Static mode's aliases: map has no params syntax — it's a flat
+  # name->target map, nothing else. Operator-pinned param overrides ("named
+  # resolutions": e.g. exposing one embedding model as several aliases that
+  # each pin their own `dimensions`) are a kv-mode-only feature — see
+  # gateway.kv.example.yaml and the README's "Named resolutions" section.
 # iam:
 #   mode: kv  # default is "static" (the keys/aliases above). "kv" instead
 #             # reads keys and aliases live from the control plane's

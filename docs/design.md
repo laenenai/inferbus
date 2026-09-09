@@ -226,7 +226,8 @@ inferbus/
 3. **M3 — Control plane:** Postgres schema, admin API, KV alias projection, OIDC on admin routes.
 4. **M4 — Usage:** worker usage events, harvester, ClickHouse schema, budget enforcement. Grafana starter dashboard: planned, not built.
 5. **M5 — Hardening + launch:** built — admission control, `MODELS` KV worker presence + fleet listing, zero-config worker, Prometheus `/metrics` on gateway and harvester, cancel/redelivery e2e, docs, console mockup ([docs/design/console-mock](design/console-mock)), first public release. Grafana starter: shipped in `deploy/grafana-usage.json`.
-6. **V1.5:** priority tiers, claim-check blobs, shared rate counters. **V2:** functional console.
+6. **M6 — Embeddings + named resolutions:** built — `POST /v1/embeddings` (`Engine.Embed` on `openai_http`/Bifrost/fakes, one `result` frame, `kind="embed"` usage), and `cpkv.AliasEntry.Params` activated end to end (gateway `mergeParams`, override-client-value semantics, reserved `model`/`stream` keys) so one concrete model can be exposed as several parameter-pinned aliases ("named resolutions") — see [docs/design-embeddings.md](design-embeddings.md). Released as v0.2.0.
+7. **V1.5:** priority tiers, claim-check blobs, shared rate counters. **V2:** functional console.
 
 ## 17. Open questions
 
