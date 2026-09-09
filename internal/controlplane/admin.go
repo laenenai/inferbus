@@ -222,7 +222,7 @@ func writeAggregateError(w http.ResponseWriter, err error) {
 		writeAdminError(w, http.StatusNotFound, errTypeNotFound, err.Error())
 	case errors.Is(err, org.ErrLastOwner), errors.Is(err, apikey.ErrDisabled):
 		writeAdminError(w, http.StatusConflict, errTypeConflict, err.Error())
-	case errors.Is(err, org.ErrInvalidRole), errors.Is(err, alias.ErrInvalidTarget):
+	case errors.Is(err, org.ErrInvalidRole), errors.Is(err, alias.ErrInvalidTarget), errors.Is(err, alias.ErrReservedParam):
 		writeAdminError(w, http.StatusBadRequest, errTypeInvalidRequest, err.Error())
 	case errors.Is(err, es.ErrConflict):
 		// handleWithRetry already retried once; this is the second,

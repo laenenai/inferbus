@@ -4,10 +4,15 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/laenenai/inferbus/internal/wire"
 )
+
+// ErrUnsupported is returned by an Engine that cannot serve a request
+// kind (e.g. an engine wired to a chat-only backend asked to embed).
+var ErrUnsupported = errors.New("engine: unsupported request kind")
 
 type Engine interface {
 	Chat(ctx context.Context, model string, body json.RawMessage) (json.RawMessage, wire.Usage, error)
@@ -25,6 +30,14 @@ type Engine interface {
 	// emit will corrupt the frame sequence the gateway relies on to detect
 	// dropped frames (internal/relay.Listener.Next's seq-gap check).
 	ChatStream(ctx context.Context, model string, body json.RawMessage, emit func(json.RawMessage) error) (wire.Usage, error)
+
+	// Embed produces embeddings for an OpenAI-shaped embeddings request
+	// body ("input" as a string or []string, plus any provider params such
+	// as "dimensions"), returning the OpenAI-shaped response body verbatim
+	// and its token usage (completion tokens are always 0 for embeddings).
+	// An engine wired to a backend that cannot embed returns
+	// ErrUnsupported.
+	Embed(ctx context.Context, model string, body json.RawMessage) (json.RawMessage, wire.Usage, error)
 }
 
 // Error is an upstream engine failure with an HTTP-mappable status.

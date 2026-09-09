@@ -193,21 +193,67 @@ func TestKVIAM_ResolveAlias_OrgOverridesGlobal(t *testing.T) {
 
 	iam := newTestKVIAM(t, js)
 
-	target, ok := iam.ResolveAlias("acme", "fast")
-	if !ok || target != "acme-model" {
-		t.Fatalf("ResolveAlias(acme, fast) = (%q, %v), want (acme-model, true)", target, ok)
+	res, ok := iam.ResolveAlias("acme", "fast")
+	if !ok || res.Target != "acme-model" {
+		t.Fatalf("ResolveAlias(acme, fast) = (%+v, %v), want target acme-model, true", res, ok)
 	}
 
 	// A different org with no override at all falls back to the global
 	// entry.
-	target, ok = iam.ResolveAlias("other-org", "fast")
-	if !ok || target != "global-model" {
-		t.Fatalf("ResolveAlias(other-org, fast) = (%q, %v), want (global-model, true)", target, ok)
+	res, ok = iam.ResolveAlias("other-org", "fast")
+	if !ok || res.Target != "global-model" {
+		t.Fatalf("ResolveAlias(other-org, fast) = (%+v, %v), want target global-model, true", res, ok)
 	}
 
 	// An unknown alias in any scope misses cleanly.
 	if _, ok := iam.ResolveAlias("acme", "nope"); ok {
 		t.Fatal("expected miss for unknown alias")
+	}
+}
+
+// TestKVIAM_ResolveAlias_SurfacesParams covers the M6 seam change: the
+// ALIASES entry's params (written by the control plane's projector since
+// M3, unread by the gateway until now) come back on the Resolution, and an
+// org-scoped entry's params win outright over the global entry's rather
+// than being layered on top of them.
+func TestKVIAM_ResolveAlias_SurfacesParams(t *testing.T) {
+	_, js := testutil.RunNATS(t)
+	kv := createBucket(t, js, cpkv.BucketAliases)
+
+	putAliasEntry(t, kv, "_global/embed", cpkv.AliasEntry{
+		Target: "bge-m3",
+		Params: map[string]string{"dimensions": "1024", "encoding_format": "float"},
+	})
+	putAliasEntry(t, kv, "acme/embed", cpkv.AliasEntry{
+		Target: "bge-m3",
+		Params: map[string]string{"dimensions": "256"},
+	})
+	putAliasEntry(t, kv, "_global/plain", cpkv.AliasEntry{Target: "bge-m3"})
+
+	iam := newTestKVIAM(t, js)
+
+	res, ok := iam.ResolveAlias("acme", "embed")
+	if !ok {
+		t.Fatal("expected acme/embed to resolve")
+	}
+	if len(res.Params) != 1 || res.Params["dimensions"] != "256" {
+		t.Fatalf("acme params = %v, want exactly {dimensions:256} (org entry replaces the global one wholesale)", res.Params)
+	}
+
+	res, ok = iam.ResolveAlias("other-org", "embed")
+	if !ok {
+		t.Fatal("expected the global embed entry to resolve")
+	}
+	if res.Params["dimensions"] != "1024" || res.Params["encoding_format"] != "float" {
+		t.Fatalf("global params = %v, want {dimensions:1024, encoding_format:float}", res.Params)
+	}
+
+	// An entry with no params at all resolves with nil Params — the merge
+	// short-circuit downstream depends on this being empty, not a
+	// zero-length-but-present map with surprising contents.
+	res, ok = iam.ResolveAlias("acme", "plain")
+	if !ok || len(res.Params) != 0 {
+		t.Fatalf("ResolveAlias(acme, plain) = (%+v, %v), want a params-free resolution", res, ok)
 	}
 }
 

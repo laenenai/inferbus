@@ -28,9 +28,9 @@ func New(baseURL string, client *http.Client) *Engine {
 	return &Engine{baseURL: strings.TrimRight(baseURL, "/"), client: client}
 }
 
-func (e *Engine) post(ctx context.Context, body []byte) (*http.Response, error) {
+func (e *Engine) post(ctx context.Context, path string, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		e.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+		e.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func (e *Engine) Chat(ctx context.Context, model string, body json.RawMessage) (
 	if err != nil {
 		return nil, wire.Usage{}, err
 	}
-	resp, err := e.post(ctx, rewritten)
+	resp, err := e.post(ctx, "/v1/chat/completions", rewritten)
 	if err != nil {
 		return nil, wire.Usage{}, err
 	}
@@ -78,12 +78,38 @@ func (e *Engine) Chat(ctx context.Context, model string, body json.RawMessage) (
 	return b, usageOf(b), nil
 }
 
+// Embed posts an OpenAI-shaped embeddings request to /v1/embeddings and
+// returns the response body alongside its prompt-token usage. Like
+// Chat/ChatStream it rewrites the body's "model" to this worker's concrete
+// name first: the gateway resolves an alias to a SUBJECT but deliberately
+// leaves the client's alias in the body, so an un-rewritten embeddings
+// request reaches the engine naming an alias it has never heard of and is
+// rejected with a 404 (caught against a real vLLM; fake engines ignore the
+// model field and cannot surface this). Embeddings have no completion tokens,
+// so wire.Usage.CompletionTokens is always 0.
+func (e *Engine) Embed(ctx context.Context, model string, body json.RawMessage) (json.RawMessage, wire.Usage, error) {
+	rewritten, err := rewriteModel(body, model)
+	if err != nil {
+		return nil, wire.Usage{}, err
+	}
+	resp, err := e.post(ctx, "/v1/embeddings", rewritten)
+	if err != nil {
+		return nil, wire.Usage{}, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, wire.Usage{}, err
+	}
+	return b, embedUsageOf(b), nil
+}
+
 func (e *Engine) ChatStream(ctx context.Context, model string, body json.RawMessage, emit func(json.RawMessage) error) (wire.Usage, error) {
 	forced, err := forceStream(body, model)
 	if err != nil {
 		return wire.Usage{}, err
 	}
-	resp, err := e.post(ctx, forced)
+	resp, err := e.post(ctx, "/v1/chat/completions", forced)
 	if err != nil {
 		return wire.Usage{}, err
 	}
@@ -178,4 +204,19 @@ func usageOf(b []byte) wire.Usage {
 		CompletionTokens: probe.Usage.CompletionTokens,
 		CachedTokens:     probe.Usage.PromptTokensDetails.CachedTokens,
 	}
+}
+
+// embedUsageOf decodes an OpenAI-shaped embeddings response's usage, which
+// carries only prompt_tokens (no completion_tokens field exists for
+// embeddings, so wire.Usage.CompletionTokens is left at its zero value).
+func embedUsageOf(b []byte) wire.Usage {
+	var probe struct {
+		Usage *struct {
+			PromptTokens int `json:"prompt_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(b, &probe) != nil || probe.Usage == nil {
+		return wire.Usage{}
+	}
+	return wire.Usage{PromptTokens: probe.Usage.PromptTokens}
 }

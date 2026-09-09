@@ -182,6 +182,69 @@ func chunkUsage(chunk *schemas.BifrostStreamChunk) wire.Usage {
 	return usageOf(chunk.BifrostChatResponse)
 }
 
+// toEmbedRequest decodes the OpenAI-shaped body's "input"/params into the
+// Bifrost embedding request type, overriding provider+model from e.cfg —
+// same Task 11 semantic as toRequest: the upstream request always uses
+// e.cfg.Model (the concrete/upstream model), never the body's own "model"
+// field (the caller-facing alias).
+func (e *Engine) toEmbedRequest(body json.RawMessage) (*schemas.BifrostEmbeddingRequest, error) {
+	var rb struct {
+		Input schemas.EmbeddingInput `json:"input"`
+	}
+	if err := json.Unmarshal(body, &rb); err != nil {
+		return nil, &ibengine.Error{Code: "bad_request", HTTPStatus: 400, Message: "request body is not a JSON object, or \"input\" is not a string or []string"}
+	}
+	var params schemas.EmbeddingParameters
+	if err := json.Unmarshal(body, &params); err != nil {
+		return nil, &ibengine.Error{Code: "bad_request", HTTPStatus: 400, Message: "request body has invalid params"}
+	}
+	return &schemas.BifrostEmbeddingRequest{
+		Provider: schemas.ModelProvider(e.cfg.Provider),
+		Model:    e.cfg.Model,
+		Input:    &rb.Input,
+		Params:   &params,
+	}, nil
+}
+
+func (e *Engine) Embed(ctx context.Context, model string, body json.RawMessage) (json.RawMessage, wire.Usage, error) {
+	req, err := e.toEmbedRequest(body)
+	if err != nil {
+		return nil, wire.Usage{}, err
+	}
+	bctx := schemas.NewBifrostContext(ctx, time.Time{})
+	resp, berr := e.b.EmbeddingRequest(bctx, req)
+	if berr != nil {
+		if isUnsupportedOperation(berr) {
+			return nil, wire.Usage{}, ibengine.ErrUnsupported
+		}
+		return nil, wire.Usage{}, mapError(berr)
+	}
+	out, err := json.Marshal(resp) // BifrostEmbeddingResponse is OpenAI-shaped
+	return out, embedUsageOf(resp), err
+}
+
+// embedUsageOf reads token usage off a BifrostEmbeddingResponse. Embeddings
+// have no completion tokens, so wire.Usage.CompletionTokens is always left
+// at its zero value.
+func embedUsageOf(resp *schemas.BifrostEmbeddingResponse) wire.Usage {
+	if resp == nil || resp.Usage == nil {
+		return wire.Usage{}
+	}
+	return wire.Usage{PromptTokens: resp.Usage.PromptTokens}
+}
+
+// isUnsupportedOperation reports whether berr is the sentinel bifrost
+// returns when the configured provider's implementation doesn't support the
+// requested operation at all (e.g. providers/wafer's Embedding always
+// returns providerUtils.NewUnsupportedOperationError) — as opposed to a
+// genuine upstream failure, which mapError below handles. Bifrost signals
+// this via ErrorField.Code == "unsupported_operation"
+// (providers/utils.NewUnsupportedOperationError); there's no exported
+// sentinel error or status code for it.
+func isUnsupportedOperation(berr *schemas.BifrostError) bool {
+	return berr != nil && berr.Error != nil && berr.Error.Code != nil && *berr.Error.Code == "unsupported_operation"
+}
+
 func mapError(berr *schemas.BifrostError) error {
 	status := 502
 	if berr.StatusCode != nil {

@@ -73,6 +73,7 @@ func newGateway(nc *nats.Conn, js jetstream.JetStream, cfg Config, iam iamProvid
 func (g *Gateway) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", g.withRequestMetrics(routeLabel("/v1/chat/completions"), g.withInflight(g.chatCompletions)))
+	mux.HandleFunc("POST /v1/embeddings", g.withRequestMetrics(routeLabel("/v1/embeddings"), g.withInflight(g.embeddings)))
 	mux.HandleFunc("GET /v1/models", g.withRequestMetrics(routeLabel("/v1/models"), g.models))
 	mux.HandleFunc("GET /healthz", g.withRequestMetrics(routeLabel("/healthz"), func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 	mux.HandleFunc("GET /readyz", g.withRequestMetrics(routeLabel("/readyz"), g.readyz))
@@ -191,6 +192,8 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 	}{Object: "list", Data: []model{}}
 	for _, alias := range key.Allow {
 		if _, exists := g.iam.ResolveAlias(key.Org, alias); exists {
+			// Only existence matters here — /v1/models lists the alias names
+			// a key may use, never what they resolve to or with.
 			out.Data = append(out.Data, model{ID: alias, Object: "model"})
 		}
 	}
@@ -217,24 +220,61 @@ func newReqID() string {
 	return hex.EncodeToString(b)
 }
 
-func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
+// Request kinds, as carried in the Ib-Kind header (wire.HdrKind) that tells
+// the worker which engine method answers a message: Chat/ChatStream for
+// kindChat, Embed for kindEmbed. Only kindChat may stream.
+const (
+	kindChat  = "chat"
+	kindEmbed = "embed"
+)
+
+// dispatched is what the shared request pipeline hands back to a handler
+// once the request has been authorized, admitted, and published: everything
+// the response half needs and nothing more.
+type dispatched struct {
+	// l is a live listener the caller MUST Close (defer d.l.Close()).
+	l        *relay.Listener
+	seq      uint64
+	reqID    string
+	deadline time.Time
+	// stream is the client's requested response shape. Only ever true for
+	// kindChat — dispatch rejects a streaming request for any other kind
+	// before publishing it.
+	stream bool
+}
+
+// dispatch runs the entire request pipeline shared by every inference
+// endpoint: ready-gate → authenticate → read/limit body → parse model →
+// resolve alias → allowlist → budget → admission → merge alias params →
+// subscribe → publish. It writes the error response itself and reports
+// false whenever the request must not proceed, so a handler's only job on
+// false is to return.
+//
+// This is one function rather than a per-handler copy on purpose: the order
+// of those gates is security-relevant (a forbidden alias must 403 before a
+// budget check leaks whether the org is over quota; nothing may reach the
+// data plane before admission), and two copies of an ordering is how one of
+// them silently rots. Handlers differ only in the RESPONSE half — SSE for
+// streaming chat, a single result frame for everything else — which stays
+// in the handlers.
+func (g *Gateway) dispatch(w http.ResponseWriter, r *http.Request, kind string) (dispatched, bool) {
 	if !g.checkReady(w) {
-		return
+		return dispatched{}, false
 	}
 	key, ok := g.authenticate(r)
 	if !ok {
 		oaiError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
-		return
+		return dispatched{}, false
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			oaiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the 1 MiB limit")
-			return
+			return dispatched{}, false
 		}
 		oaiError(w, http.StatusBadRequest, "invalid_request_error", "unreadable body")
-		return
+		return dispatched{}, false
 	}
 	var req struct {
 		Model  string `json:"model"`
@@ -242,20 +282,32 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.Unmarshal(body, &req); err != nil || req.Model == "" {
 		oaiError(w, http.StatusBadRequest, "invalid_request_error", "body must be a JSON object with a model field")
-		return
+		return dispatched{}, false
 	}
-	target, exists := g.iam.ResolveAlias(key.Org, req.Model)
+	// Only chat has a streaming response shape. An embed request is answered
+	// by exactly one result frame no matter what the body's stream flag says
+	// (the worker ignores it outright), so honoring "stream":true silently
+	// would hand the client a plain JSON body where it is parsing SSE —
+	// telling it the request is invalid is the only honest answer. Checked
+	// before any gate with a side effect, so a rejected request never counts
+	// against a budget or a queue.
+	if kind != kindChat && req.Stream {
+		oaiError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("streaming is not supported on %s", r.URL.Path))
+		return dispatched{}, false
+	}
+	res, exists := g.iam.ResolveAlias(key.Org, req.Model)
 	if !exists {
 		oaiError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("unknown model alias %q", req.Model))
-		return
+		return dispatched{}, false
 	}
+	target := res.Target
 	if !slices.Contains(key.Allow, req.Model) {
 		oaiError(w, http.StatusForbidden, "model_forbidden", fmt.Sprintf("key is not allowed to use %q", req.Model))
-		return
+		return dispatched{}, false
 	}
 	if g.budgetExceeded(key) {
 		oaiError(w, http.StatusPaymentRequired, "budget_exhausted", "monthly token budget exhausted")
-		return
+		return dispatched{}, false
 	}
 	// Admission control is the last gate before the queue, and it is keyed
 	// on the CONCRETE model (target), not the alias: backlog is a property
@@ -266,7 +318,18 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		g.metrics.admissionRejected.WithLabelValues(target).Inc()
 		w.Header().Set("Retry-After", strconv.Itoa(g.admission.retryAfter()))
 		oaiError(w, http.StatusTooManyRequests, "overloaded", "model queue is full, retry later")
-		return
+		return dispatched{}, false
+	}
+
+	// Alias params (kv mode only) are baked into the body the gateway
+	// publishes, not carried as a side channel on relay.Request: the worker
+	// and the engines are deliberately dumb about aliases — whatever reaches
+	// them is already the request the operator meant. With no params this is
+	// a no-op that returns the very same byte slice.
+	body, err = mergeParams(body, res.Params)
+	if err != nil {
+		oaiError(w, http.StatusBadRequest, "invalid_request_error", "body must be a JSON object with a model field")
+		return dispatched{}, false
 	}
 
 	reqID := newReqID()
@@ -276,18 +339,29 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	l, err := relay.Listen(g.nc, reqID) // subscribe BEFORE publish
 	if err != nil {
 		oaiError(w, http.StatusInternalServerError, "internal_error", "subscribe failed")
-		return
+		return dispatched{}, false
 	}
-	defer l.Close()
 
 	seq, err := relay.Publish(ctx, g.js, relay.Request{
 		Model: target, Org: key.Org, Project: key.Project, KeyID: keyID(key),
-		Alias: req.Model, ReqID: reqID, Kind: "chat", Deadline: deadline, Body: body,
+		Alias: req.Model, ReqID: reqID, Kind: kind, Deadline: deadline, Body: body,
 	})
 	if err != nil {
+		// The listener never reaches a handler on this path, so close it
+		// here rather than leaking the subscription.
+		l.Close()
 		oaiError(w, http.StatusServiceUnavailable, "transport_error", "queue publish failed")
+		return dispatched{}, false
+	}
+	return dispatched{l: l, seq: seq, reqID: reqID, deadline: deadline, stream: req.Stream}, true
+}
+
+func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	d, ok := g.dispatch(w, r, kindChat)
+	if !ok {
 		return
 	}
+	defer d.l.Close()
 
 	// Client disconnect is detected synchronously, inline in the read loops
 	// below, rather than with a separate goroutine watching ctx.Done(). An
@@ -313,11 +387,25 @@ func (g *Gateway) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// in the same place the read loop already decides how to respond, so
 	// cleanup is invoked from there directly instead of via a racing
 	// watcher.
-	if req.Stream {
-		g.streamOut(ctx, w, l, deadline, reqID, seq)
+	if d.stream {
+		g.streamOut(r.Context(), w, d.l, d.deadline, d.reqID, d.seq)
 	} else {
-		g.resultOut(ctx, w, l, deadline, reqID, seq)
+		g.resultOut(r.Context(), w, d.l, d.deadline, d.reqID, d.seq)
 	}
+}
+
+// embeddings backs POST /v1/embeddings. It is chatCompletions minus the
+// streaming half: the same pipeline (see dispatch) publishes the request
+// with Ib-Kind: embed, and the worker answers with exactly one result frame
+// — which is precisely what resultOut already reads, including its
+// disconnect/deadline cleanup.
+func (g *Gateway) embeddings(w http.ResponseWriter, r *http.Request) {
+	d, ok := g.dispatch(w, r, kindEmbed)
+	if !ok {
+		return
+	}
+	defer d.l.Close()
+	g.resultOut(r.Context(), w, d.l, d.deadline, d.reqID, d.seq)
 }
 
 // clientDisconnected reports whether ctx — the caller's original request

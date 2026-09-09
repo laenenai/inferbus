@@ -41,11 +41,11 @@ func newGWMetrics() *gwMetrics {
 		}, []string{"route", "code"}),
 		admissionRejected: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "inferbus_admission_rejected_total",
-			Help: "Total chat completion requests rejected by admission control (429), by concrete model.",
+			Help: "Total inference requests (chat completions, embeddings) rejected by admission control (429), by concrete model.",
 		}, []string{"model"}),
 		inflight: f.NewGauge(prometheus.GaugeOpts{
 			Name: "inferbus_inflight_requests",
-			Help: "Number of chat completion requests currently being handled by the gateway.",
+			Help: "Number of inference requests (chat completions, embeddings) currently being handled by the gateway.",
 		}),
 	}
 }
@@ -58,11 +58,9 @@ func (m *gwMetrics) Handler() http.Handler {
 }
 
 // routeLabel maps an HTTP path to the bounded route label the cardinality
-// guard requires: route ∈ {chat, embeddings, models, other}. There is
-// deliberately no embeddings HTTP handler in this repo yet — the label
-// value exists for forward compatibility with spec §6, not because
-// anything emits it today. Every other path (healthz, readyz, and any
-// future route) folds into "other" rather than ever emitting a raw path.
+// guard requires: route ∈ {chat, embeddings, models, other}. Every other
+// path (healthz, readyz, and any future route) folds into "other" rather
+// than ever emitting a raw path.
 func routeLabel(path string) string {
 	switch path {
 	case "/v1/chat/completions":

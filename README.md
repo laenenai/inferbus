@@ -36,10 +36,12 @@ the client as SSE. Workers also emit per-request usage events onto a
 - **Metering built in** — every request (success, error, or cancel) emits a
   usage event with tokens, TTFT, queue time, and provider attribution.
 
-**Status:** v0.1.0 — M1 through M5 shipped (data path, control plane, usage
-pipeline, and hardening: admission control, worker fleet visibility,
-Prometheus metrics). See [docs/design.md](docs/design.md)
-for the full design spec and milestone plan, and
+**Status:** v0.2.0 — M1 through M6 shipped (data path, control plane, usage
+pipeline, hardening, and embeddings + named resolutions). See
+[docs/design.md](docs/design.md) for the full design spec and milestone
+plan, [docs/architecture.md](docs/architecture.md) for a system diagram and
+annotated call stacks, [docs/design-embeddings.md](docs/design-embeddings.md)
+for the M6 embeddings + alias-params design, and
 [docs/design/console-mock](docs/design/console-mock) for the management
 console design (Design Component artboards for the planned v2 console).
 
@@ -110,7 +112,8 @@ rejects further requests from an exhausted key with `402`. See
 | Area | Status |
 |---|---|
 | Chat completions (`/v1/chat/completions`, streaming + non-streaming) | done |
-| Embeddings (`/v1/embeddings`) | planned |
+| Embeddings (`/v1/embeddings`, non-streaming) | done — see [Embeddings](#embeddings) below |
+| Alias param overrides / named resolutions (`cpkv.AliasEntry.Params`, kv mode) | done — see [Named resolutions](#named-resolutions-alias-params) below |
 | Cancel / deadline semantics (queued-delete, mid-stream cancel, deadline backstop) | done |
 | Bifrost engine (multi-provider: OpenAI, Anthropic, Ollama, ...) | done |
 | Static YAML keys/aliases | done |
@@ -263,6 +266,104 @@ the alias `fast` → `llama3.2`) and restart it. **Change that key before
 exposing the gateway to anything but your own machine** — it is a public,
 checked-in credential. KV mode forbids a static `keys:` list and errors on
 startup if it finds one; static mode has no budget enforcement.
+
+## Embeddings
+
+`POST /v1/embeddings` is OpenAI-compatible and non-streaming — `stream:
+true` is rejected with `400 invalid_request_error` (the OpenAI embeddings
+API has no streaming form). It shares the gateway's whole request pipeline
+with chat completions (auth, alias resolution, allowlist, budget,
+admission) and the same worker/engine seam: `Engine.Embed` on `openai_http`
+and embedded Bifrost, alongside the fakes the test suite uses. Like chat, a
+usage event is published for every request, `kind="embed"` and
+`completion_tokens` always 0 (embeddings never generate).
+
+```sh
+curl http://localhost:8080/v1/embeddings \
+  -H "Authorization: Bearer $IB_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"embed","input":"the quick brown fox"}'
+```
+
+`embed` here is an alias, resolved exactly like a chat alias: point it at an
+embedding-serving model's own id, either in a static `aliases:` map or
+through the control plane's admin API (kv mode) — see [Named
+resolutions](#named-resolutions-alias-params) below for pinning per-alias
+parameters such as vector size.
+
+**Engine support for `dimensions` is not uniform, and inferbus does not
+paper over it.** vLLM honors `dimensions` for Matryoshka-trained embedding
+models (and rejects it for others that don't support truncation); Bifrost
+forwards it to whichever remote provider it's configured for; **Ollama
+silently ignores `dimensions` and returns the model's native vector size**
+— no error, no truncation, no warning. inferbus never truncates or
+renormalizes a vector itself (that would silently change embedding
+semantics), so when targeting an engine whose `dimensions` support you
+haven't verified, validate the length of the vector you actually got back
+rather than assuming the request was honored.
+
+## Named resolutions (alias params)
+
+In `iam.mode: kv`, an alias can carry operator-pinned parameters
+(`cpkv.AliasEntry.Params`) that are merged into every request that resolves
+it, **overriding** any client-supplied value for the same key — the alias
+is the operator's contract for what that name means; a client cannot
+override it by sending its own value. This is how one concrete model can be
+exposed as several differently-behaved aliases with no worker or engine
+config of its own: "named resolutions."
+
+The motivating case is embeddings — one worker serving `nomic-embed-text`,
+exposed as two aliases that each pin their own vector size:
+
+```sh
+curl -X PUT http://localhost:8081/admin/v1/aliases/acme/embed-hd \
+  -H "Authorization: Bearer dev_admin_change_me" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"nomic-embed-text","params":{"dimensions":"1024"}}'
+
+curl -X PUT http://localhost:8081/admin/v1/aliases/acme/embed-compact \
+  -H "Authorization: Bearer dev_admin_change_me" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"nomic-embed-text","params":{"dimensions":"256"}}'
+```
+
+A client picks a vector size by choosing an alias and never sends
+`dimensions` itself — both requests below reach the very same worker and
+model, each with its own pinned size:
+
+```sh
+curl http://localhost:8080/v1/embeddings \
+  -H "Authorization: Bearer $IB_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"embed-hd","input":"the quick brown fox"}'
+```
+
+Params apply identically to chat aliases (e.g. pinning a `temperature`
+default) — the mechanism isn't embeddings-specific; embeddings is just the
+case that motivated it.
+
+**Typing.** `params` values are always strings in the KV entry (`"1024"`,
+never the bare number), because that's the shape the admin API and KV
+projection store them in. Each value is parsed as JSON before being merged
+into the request body: a value that parses as a JSON scalar/array/object is
+inserted as that type (`"1024"` → the number `1024`, `"true"` → the boolean
+`true`, `"[1,2]"` → the array `[1,2]`); anything that doesn't parse (a plain
+word like `"float"`) is inserted as a JSON string. **Escape hatch:** if a
+parameter's value must be the literal JSON *string* `"512"` rather than the
+number `512`, write it pre-escaped: `"params":{"foo":"\"512\""}` yields the
+JSON string `"512"` on the wire, because the value `"512"` (two quote
+characters included) is itself valid JSON — a JSON string whose contents
+are the three characters `512`.
+
+**Reserved keys.** `model` and `stream` can never be set as alias params —
+rejected at the admin API (400) and, defensively, skipped with a warning at
+merge time — since either would break alias resolution or desync the
+response shape from what the gateway has already committed to.
+
+Static mode has no `params` syntax at all — its `aliases:` block is a flat
+name → target map with nowhere to put them. Named resolutions is therefore
+a kv-mode-only feature: it needs the control plane's `ALIASES` bucket to
+carry the per-alias params.
 
 ## Budgets (optional)
 
@@ -492,6 +593,15 @@ The test suite runs against an embedded, in-process JetStream server
 CI runs vet, the race-enabled suite, a branding check, and a container build
 on every push and pull request.
 
+Embeddings and named resolutions are covered by two kinds of e2e test:
+`internal/e2e/m6_embeddings_test.go` runs entirely against fake engines (CI
+default, no external services), while `internal/e2e/live_embed_test.go` is
+an opportunistic, env-gated test that drives the same named-resolutions
+scenario against a **real** OpenAI-compatible embedding server —
+`INFERBUS_LIVE_EMBED=http://host:port INFERBUS_LIVE_EMBED_MODEL=<model-id>
+go test ./internal/e2e/ -run TestLiveEmbeddings -v` — and is skipped
+cleanly, never gating, when those env vars aren't set.
+
 ## Roadmap
 
 | Milestone | Scope |
@@ -499,6 +609,7 @@ on every push and pull request.
 | **M3** | ✅ shipped — Control plane: event-sourced on [es-lite](https://github.com/laenenai/es-lite) with orgs/projects/keys/aliases, admin API, NATS KV projections watched live by gateways, OIDC — see [docs/design-controlplane.md](docs/design-controlplane.md) |
 | **M4** | ✅ shipped — Usage pipeline: `harvester` consuming `METERING` into ClickHouse; budget ledger + gateway `402` enforcement via `BUDGETS` KV — see [docs/design-usage.md](docs/design-usage.md) |
 | **M5** | ✅ shipped — Hardening: admission control from queue depth, `MODELS` KV worker presence + fleet listing, zero-config worker, Prometheus `/metrics`, docs, first public release (v0.1.0) — see [Admission control](#admission-control-optional) and [Observability](#observability) above |
+| **M6** | ✅ shipped — `POST /v1/embeddings` and alias param overrides ("named resolutions"), release v0.2.0 — see [Embeddings](#embeddings) and [Named resolutions](#named-resolutions-alias-params) above, and [docs/design-embeddings.md](docs/design-embeddings.md) |
 | **v1.5** | Priority tiers, claim-check for large payloads |
 | **v2** | Management console (see [the design mock](docs/design/console-mock)) |
 

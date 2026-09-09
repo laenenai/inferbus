@@ -529,6 +529,79 @@ func TestAdmin_AliasGlobalScope_ReadsNeedOnlyRead(t *testing.T) {
 	}
 }
 
+// TestAdmin_SetAlias_ReservedParamRejected is Task 5: PUT alias params
+// carrying a reserved key ("model" or "stream", case-insensitively) must
+// be rejected with 400 invalid_request_error naming the offending key,
+// rather than being silently stored — a stored "Stream" param would
+// otherwise flip a later gateway request into streaming while the
+// caller waits for a single result frame (case-insensitivity is
+// load-bearing: encoding/json matches struct fields case-insensitively
+// and a later duplicate wins, see internal/gateway/params.go).
+func TestAdmin_SetAlias_ReservedParamRejected(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret"}
+	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
+	mux := f.admin.Routes()
+
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{"model exact lowercase", "model"},
+		{"stream exact lowercase", "stream"},
+		{"Model capitalized", "Model"},
+		{"MODEL uppercase", "MODEL"},
+		{"sTrEaM mixed case", "sTrEaM"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(t, mux, http.MethodPut, "/admin/v1/aliases/_global/fast", "s3cret", map[string]any{
+				"target": "gpt-4",
+				"params": map[string]string{tc.key: "x"},
+			})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if typ := decodeErrorType(t, rec); typ != errTypeInvalidRequest {
+				t.Fatalf("error.type = %q, want %q", typ, errTypeInvalidRequest)
+			}
+			var body struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("unmarshal error body: %v (body=%s)", err, rec.Body.String())
+			}
+			if !strings.Contains(body.Error.Message, tc.key) {
+				t.Fatalf("error.message = %q, want it to name the offending key %q", body.Error.Message, tc.key)
+			}
+		})
+	}
+}
+
+// TestAdmin_SetAlias_NonReservedParamAccepted proves the reserved-key
+// rejection does not overreach: an ordinary alias param such as
+// "dimensions" is accepted and stored via the admin API exactly as sent.
+func TestAdmin_SetAlias_NonReservedParamAccepted(t *testing.T) {
+	cfg := Config{BootstrapToken: "s3cret"}
+	f := newAdminFixture(t, cfg, &fakeVerifier{}, nil, nil)
+	mux := f.admin.Routes()
+
+	rec := doRequest(t, mux, http.MethodPut, "/admin/v1/aliases/_global/embed", "s3cret", map[string]any{
+		"target": "text-embedding-3",
+		"params": map[string]string{"dimensions": "512"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp aliasResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, rec.Body.String())
+	}
+	if resp.Params["dimensions"] != "512" {
+		t.Fatalf("params = %v, want dimensions=512", resp.Params)
+	}
+}
+
 // flakyStore wraps a real es.Store and makes its Append return
 // es.ErrConflict a configurable number of times before delegating for
 // real — a deterministic "double-write scripted through the runtime" that

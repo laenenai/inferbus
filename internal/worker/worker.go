@@ -239,10 +239,21 @@ func (w *Worker) handle(ctx context.Context, mc ModelConfig, msg jetstream.Msg) 
 		Stream *bool `json:"stream"`
 	}
 	_ = json.Unmarshal(msg.Data(), &probe)
-	streaming := probe.Stream != nil && *probe.Stream
+	// The worker itself never streams an embed request: any "stream" field
+	// in the body is ignored for m.kind == "embed", so it always takes the
+	// non-streaming branch below and returns exactly one result frame.
+	streaming := m.kind != "embed" && probe.Stream != nil && *probe.Stream
 
 	if !streaming {
-		resp, usage, err := eng.Chat(hctx, mc.Name, msg.Data())
+		// Both kinds share the exact same terminal-outcome switch below
+		// (nil / client-cancel / deadline / worker-shutdown / error) — only
+		// which engine method answers the request differs, so that choice
+		// is captured in a closure rather than duplicating the switch.
+		call := eng.Chat
+		if m.kind == "embed" {
+			call = eng.Embed
+		}
+		resp, usage, err := call(hctx, mc.Name, msg.Data())
 		dur := time.Since(start).Milliseconds()
 		switch {
 		case err == nil:
@@ -321,6 +332,9 @@ func (w *Worker) handle(ctx context.Context, mc ModelConfig, msg jetstream.Msg) 
 // terminal error frame, unwrapping *ibengine.Error for its code/status
 // when present. Shared by the streaming and non-stream terminal switches.
 func terminalError(err error) wire.WireError {
+	if errors.Is(err, ibengine.ErrUnsupported) {
+		return wire.WireError{Code: "unsupported_kind", Message: err.Error(), HTTPStatus: 400}
+	}
 	we := wire.WireError{Code: "worker_error", Message: err.Error(), HTTPStatus: 502}
 	var ee *ibengine.Error
 	if errors.As(err, &ee) {

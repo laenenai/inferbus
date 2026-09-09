@@ -591,3 +591,88 @@ func TestKVMode_BudgetExceeded402ThenClearsOnFlip(t *testing.T) {
 		t.Fatalf("status after flip = %d, want 200", resp2.StatusCode)
 	}
 }
+
+// TestKVModeAliasParamsReachPublishedBody is M6 Task 3's end-to-end proof:
+// an ALIASES entry carrying params must show up in the body the gateway
+// actually publishes onto the data plane, correctly typed (the string
+// "256" becomes the JSON number 256) and overriding whatever the client
+// sent for the same key — the worker and engines are deliberately dumb
+// about aliases, so if the params are not in this message they are nowhere.
+// The reserved keys are checked here too: an alias that tries to rewrite
+// "model" or force "stream" must not affect the published request.
+func TestKVModeAliasParamsReachPublishedBody(t *testing.T) {
+	nc, js := testutil.RunNATS(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	w := worker.New(nc, js, map[string]ibengine.Engine{"llama-70b": &testutil.FakeEngine{}}, worker.Config{
+		WorkerID: "w1",
+		Models:   []worker.ModelConfig{{Name: "llama-70b", MaxInflight: 2}},
+	})
+	ready := make(chan struct{})
+	go func() { _ = w.RunReady(ctx, ready) }()
+	<-ready
+
+	keysKV := createBucket(t, js, cpkv.BucketKeys)
+	aliasesKV := createBucket(t, js, cpkv.BucketAliases)
+	putAliasEntry(t, aliasesKV, "_global/smart", cpkv.AliasEntry{
+		Target: "llama-70b",
+		Params: map[string]string{
+			"dimensions":      "256",   // typed: JSON number
+			"encoding_format": "float", // unparseable: stays a JSON string
+			"model":           "evil",  // reserved: must be ignored
+			"stream":          "true",  // reserved: must be ignored
+		},
+	})
+
+	const plaintext = "ib_test_kv_params"
+	putKeyEntry(t, keysKV, cpkv.HashKey(plaintext), cpkv.KeyEntry{
+		Id: "key-params-1", Name: "params-key", Org: "acme", Project: "prod",
+		Allow: []string{"smart"},
+	})
+
+	kviam := newTestKVIAM(t, js)
+	g := gateway.NewWithIAM(nc, js, gateway.Config{
+		RequestTimeout: 30 * time.Second,
+		IAM:            gateway.IAMConfig{Mode: "kv"},
+	}, kviam)
+	srv := httptest.NewServer(g.Routes())
+	t.Cleanup(srv.Close)
+
+	sub, err := nc.SubscribeSync("inference.req.>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Unsubscribe() //nolint:errcheck // test cleanup
+
+	// The client asks for dimensions 9; the alias pins 256, and the alias wins.
+	resp := post(t, srv, plaintext, `{"model":"smart","dimensions":9,"messages":[{"role":"user","content":"hi"}]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	m, err := sub.NextMsg(5 * time.Second)
+	if err != nil {
+		t.Fatalf("expected a published inference request: %v", err)
+	}
+	var published map[string]any
+	if err := json.Unmarshal(m.Data, &published); err != nil {
+		t.Fatalf("published body is not a JSON object: %v (%s)", err, m.Data)
+	}
+	if published["dimensions"] != float64(256) {
+		t.Fatalf("published dimensions = %v (%T), want the alias's 256 as a JSON number", published["dimensions"], published["dimensions"])
+	}
+	if published["encoding_format"] != "float" {
+		t.Fatalf("published encoding_format = %v, want the JSON string \"float\"", published["encoding_format"])
+	}
+	if published["model"] != "smart" {
+		t.Fatalf("published model = %v, want the client's alias %q untouched by the reserved param", published["model"], "smart")
+	}
+	if _, present := published["stream"]; present {
+		t.Fatalf("reserved stream param leaked into the published body: %s", m.Data)
+	}
+	if published["messages"] == nil {
+		t.Fatalf("merge dropped the client's own fields: %s", m.Data)
+	}
+}

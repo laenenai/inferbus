@@ -3,6 +3,7 @@ package alias_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	controlplanev1 "github.com/laenenai/inferbus/api/controlplane/v1"
@@ -379,5 +380,76 @@ func TestParamsMapNotAliased(t *testing.T) {
 	}
 	if _, ok := res.State.GetParams()["new-key"]; ok {
 		t.Fatalf("state.params after set contains sneaked-in key added post-Handle via aliasing")
+	}
+}
+
+// TestSetAliasReservedParamRejected is Task 5: Decide must reject a
+// SetAlias whose params contain a reserved key ("model" or "stream")
+// with ErrReservedParam, producing zero events / no state change — the
+// invariant lives in the aggregate so it holds for every command path,
+// not just the admin HTTP handler. Matching is case-insensitive
+// (binding: this fixed a real hang in Task 3 — encoding/json matches
+// struct fields case-insensitively and a later duplicate wins, so a
+// stored "Stream" param would flip the worker into streaming while the
+// gateway waits for a single result frame), so case variants are tested
+// explicitly alongside the exact-lowercase reserved spellings.
+func TestSetAliasReservedParamRejected(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{"model exact lowercase", "model"},
+		{"stream exact lowercase", "stream"},
+		{"Model capitalized", "Model"},
+		{"MODEL uppercase", "MODEL"},
+		{"Stream capitalized", "Stream"},
+		{"sTrEaM mixed case", "sTrEaM"},
+		// U+017F LATIN SMALL LETTER LONG S folds onto "s" the way
+		// encoding/json matches field names, but strings.ToLower leaves it
+		// alone — so a ToLower guard admitted this key, and because
+		// marshalling sorts keys it then sorted after "stream" and won the
+		// worker's stream probe downstream. Must be rejected here too, or a
+		// hand-written alias could desync gateway and worker.
+		{"long-s stream homoglyph", "\u017ftream"},
+		{"long-s STREAM homoglyph", "\u017fTREAM"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newRuntime(t)
+			stream := sid(t, "acme-gpt-4")
+
+			res, err := rt.Handle(ctx, stream, setCmd("model-a", map[string]string{tc.key: "x"}), es.Meta{})
+			if !errors.Is(err, alias.ErrReservedParam) {
+				t.Fatalf("set params {%q: x}: got %v, want ErrReservedParam", tc.key, err)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("err.Error() = %q, want it to name the offending key %q", err.Error(), tc.key)
+			}
+			if len(res.Events) != 0 {
+				t.Fatalf("set reserved param %q: %d events, want 0", tc.key, len(res.Events))
+			}
+		})
+	}
+}
+
+// TestSetAliasNonReservedParamAccepted proves the reserved-key rejection
+// does not overreach: an ordinary alias param such as "dimensions" (the
+// embeddings-specific param this milestone adds) is accepted and stored
+// exactly as sent.
+func TestSetAliasNonReservedParamAccepted(t *testing.T) {
+	ctx := context.Background()
+	rt := newRuntime(t)
+	stream := sid(t, "acme-embed")
+
+	res, err := rt.Handle(ctx, stream, setCmd("text-embedding-3", map[string]string{"dimensions": "512"}), es.Meta{})
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if len(res.Events) != 1 {
+		t.Fatalf("%d events, want 1", len(res.Events))
+	}
+	if got := res.State.GetParams()["dimensions"]; got != "512" {
+		t.Fatalf("state.params[dimensions] = %q, want 512", got)
 	}
 }

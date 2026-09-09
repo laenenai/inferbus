@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-09
+
+### Added (M6)
+- `POST /v1/embeddings`: OpenAI-compatible, non-streaming (`stream: true` → `400 invalid_request_error`); shares the gateway's auth/allowlist/budget/admission pipeline with chat.
+- `Engine.Embed` on `openai_http`, embedded Bifrost, and the test fakes; an engine that can't embed returns `unsupported_kind` (400).
+- Alias param overrides ("named resolutions"): `cpkv.AliasEntry.Params` are merged into the request body, overriding any client value — lets one concrete model be exposed as several aliases pinning their own parameters (e.g. `dimensions` for embeddings). `model`/`stream` are refused as param keys, case-insensitively, at both the admin API and merge time.
+- Usage events carry `kind="embed"` with `completion_tokens` always 0.
+
+### Fixed
+- `openai_http`'s `Embed` sent the client's alias as the request's `model` field instead of the worker's concrete model name (the same rewrite `Chat` already performed).
+
 ## [0.1.0] - 2026-09-08
 
 First public release.
@@ -31,4 +42,5 @@ First public release.
 - E2E coverage: worker-crash redelivery, admission-control 429 under synthetic backlog, zero-config worker discovery.
 - Grafana starter dashboard (`deploy/grafana-usage.json`) over `usage_events`: tokens/hour by model, requests/hour by alias, error rate.
 
+[0.2.0]: https://github.com/laenenai/inferbus/releases/tag/v0.2.0
 [0.1.0]: https://github.com/laenenai/inferbus/releases/tag/v0.1.0
