@@ -75,22 +75,24 @@ var ErrReservedParam = errors.New("alias: reserved param key")
 // here rather than imported: the control plane must not depend on the
 // gateway package, which itself does not depend on the control plane
 // today. Keep the two sets in sync if either grows.
-var reservedParamKeys = map[string]struct{}{
-	"model":  {},
-	"stream": {},
-}
+var reservedParamKeys = []string{"model", "stream"}
 
 // firstReservedParamKey reports the first key in params (map iteration
 // order — nondeterministic when more than one match, but Decide only
-// needs to name one offending key) whose lowercased form is reserved. The
-// matching is case-insensitive for the same reason
+// needs to name one offending key) that folds onto a reserved name. The
+// matching is Unicode-case-insensitive for the same reason
 // internal/gateway/params.go's skip is: encoding/json matches struct
 // field names case-insensitively with a later duplicate winning, so an
 // alias param spelled "Stream" must be rejected exactly like "stream".
 func firstReservedParamKey(params map[string]string) (string, bool) {
 	for k := range params {
-		if _, reserved := reservedParamKeys[strings.ToLower(k)]; reserved {
-			return k, true
+		for _, reserved := range reservedParamKeys {
+			// EqualFold, not ToLower: encoding/json matches field names by
+			// Unicode simple folding, so "ſtream" (U+017F) folds onto
+			// "stream" downstream while ToLower leaves it untouched here.
+			if strings.EqualFold(k, reserved) {
+				return k, true
+			}
 		}
 	}
 	return "", false

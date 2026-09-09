@@ -406,6 +406,14 @@ func TestSetAliasReservedParamRejected(t *testing.T) {
 		{"MODEL uppercase", "MODEL"},
 		{"Stream capitalized", "Stream"},
 		{"sTrEaM mixed case", "sTrEaM"},
+		// U+017F LATIN SMALL LETTER LONG S folds onto "s" the way
+		// encoding/json matches field names, but strings.ToLower leaves it
+		// alone — so a ToLower guard admitted this key, and because
+		// marshalling sorts keys it then sorted after "stream" and won the
+		// worker's stream probe downstream. Must be rejected here too, or a
+		// hand-written alias could desync gateway and worker.
+		{"long-s stream homoglyph", "\u017ftream"},
+		{"long-s STREAM homoglyph", "\u017fTREAM"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt := newRuntime(t)

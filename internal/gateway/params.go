@@ -25,9 +25,22 @@ import (
 // ChatStream while the gateway is already committed to resultOut — the
 // request would hang until its deadline. Keys here are lowercase; lookups
 // lowercase the candidate.
-var reservedParams = map[string]struct{}{
-	"model":  {},
-	"stream": {},
+var reservedParams = []string{"model", "stream"}
+
+// isReservedParam reports whether k names a reserved body field, matching
+// the way encoding/json itself matches field names: Unicode SIMPLE FOLDING,
+// not ASCII lowercasing. The difference is exploitable, not academic —
+// strings.ToLower leaves "ſtream" (U+017F LATIN SMALL LETTER LONG S)
+// unchanged, so a ToLower guard lets it through, while encoding/json folds
+// it onto "stream" and, because marshalling sorts keys and "ſtream" sorts
+// after "stream", the injected value WINS the worker's stream probe.
+func isReservedParam(k string) bool {
+	for _, r := range reservedParams {
+		if strings.EqualFold(k, r) {
+			return true
+		}
+	}
+	return false
 }
 
 // errBodyNotObject is what mergeParams returns for a body that is valid JSON
@@ -71,7 +84,7 @@ func mergeParams(body []byte, params map[string]string) ([]byte, error) {
 	}
 
 	for k, v := range params {
-		if _, reserved := reservedParams[strings.ToLower(k)]; reserved {
+		if isReservedParam(k) {
 			slog.Warn("gateway: alias param ignored: reserved key", "key", k)
 			continue
 		}

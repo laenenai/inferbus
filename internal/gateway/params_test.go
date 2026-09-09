@@ -126,7 +126,13 @@ func TestMergeParamsNonObjectBody(t *testing.T) {
 // exact-match reserved check let exactly that through.
 func TestMergeParamsReservedKeysAreCaseInsensitive(t *testing.T) {
 	body := []byte(`{"model":"real-target","stream":false,"input":"hi"}`)
-	for _, key := range []string{"Stream", "STREAM", "sTrEaM", "Model", "MODEL"} {
+	// "\u017f" is LATIN SMALL LETTER LONG S: encoding/json folds it onto
+	// "s" when matching field names, but strings.ToLower does not — so a
+	// ToLower guard let "\u017ftream" through, and because marshalling sorts
+	// keys it sorted AFTER "stream" and won the worker's stream probe. The
+	// gateway would commit to SSE while the worker returned one result
+	// frame: HTTP 200, empty stream, request billed.
+	for _, key := range []string{"Stream", "STREAM", "sTrEaM", "Model", "MODEL", "\u017ftream", "\u017fTREAM"} {
 		out, err := mergeParams(body, map[string]string{key: "true"})
 		if err != nil {
 			t.Fatalf("mergeParams with %q: %v", key, err)
@@ -143,6 +149,30 @@ func TestMergeParamsReservedKeysAreCaseInsensitive(t *testing.T) {
 		}
 		if got["model"] != "real-target" {
 			t.Errorf("param %q changed model to %v: %s", key, got["model"], out)
+		}
+	}
+}
+
+// TestMergeParamsAllowsLookalikeNonReservedKeys is the negative half of
+// TestMergeParamsReservedKeysAreCaseInsensitive: the guard must fold like
+// encoding/json does and no further. Keys that merely resemble a reserved
+// name — extra whitespace, a different word — are ordinary params and must
+// still reach the body, or an over-broad guard would silently drop valid
+// operator configuration.
+func TestMergeParamsAllowsLookalikeNonReservedKeys(t *testing.T) {
+	// "\u212atream" starts with KELVIN SIGN, which folds to "k", not "s" —
+	// it is a lookalike that must NOT be caught, pinning the fold boundary.
+	for _, key := range []string{" stream", "stream ", "streams", "model_name", "streaming", "\u212atream"} {
+		out, err := mergeParams([]byte(`{"model":"m","input":"hi"}`), map[string]string{key: "1"})
+		if err != nil {
+			t.Fatalf("mergeParams with %q: %v", key, err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal for %q: %v", key, err)
+		}
+		if _, present := got[key]; !present {
+			t.Errorf("non-reserved key %q was wrongly dropped: %s", key, out)
 		}
 	}
 }
