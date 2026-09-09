@@ -96,7 +96,7 @@ The original private scaffold served as the porting source, not the destination;
 - **Loop:** one JetStream pull consumer per served model (durable `model-<slug>`), bounded concurrent handlers per model (config: `max_inflight`). In-progress ack extension (heartbeat) while a request runs; `MaxDeliver: 2` so a crashed worker's request is retried once.
 - **Engine layer (built — two adapters, not Bifrost-only):** `openai_http` talks to any OpenAI-compatible HTTP server (Ollama, vLLM, llama.cpp) directly; embedded **Bifrost** (Go library) handles multi-provider routing (OpenAI, Anthropic, Ollama, vLLM, MLX, ...) for models that need it. Each model in config picks one engine. The worker translates wire requests → engine calls → streamed chunks on the reply subject.
 - **Usage:** on completion (or error/cancel) publish one usage event to `metering.usage.<org>.<project>.<model>` (fields in §10, superseded by [docs/design-usage.md](docs/design-usage.md)). Aborted streams set `estimated: true`.
-- **Advertisement (planned, not built):** a heartbeat entry in the `MODELS` KV bucket (`worker.<worker_id>` → served models, versions, last-seen) was designed for gateway `/readyz`-style checks and ops visibility with TTL-expired entries dropping out. This does not exist yet: a worker's model list is read once at startup, and changing it (or its config) requires restarting the worker process — there is no live reload and nothing to invalidate.
+- **Advertisement (shipped in M5, see [design-hardening.md](design-hardening.md) §3):** each worker writes a heartbeat entry into the `MODELS` KV bucket (key `<worker_id>` → served models, engine, max_inflight, started/last-seen) every 15s under a 45s bucket TTL, so a stopped worker's entry expires on its own; `GET /admin/v1/workers` lists the fleet from it. Advertisement is best-effort and the data path never depends on it. A worker's model list is still read once at startup: changing it (or its config) requires restarting the worker process — there is no live reload.
 
 ### 6.3 `inferbus harvester`
 
@@ -166,7 +166,7 @@ Admin API and (v2) console authenticate humans via OIDC bearer JWTs — configur
 - `usage_events` — `ReplacingMergeTree` keyed `(org, ts, req_id)` (replays from at-least-once delivery collapse on `req_id`), partitioned monthly, TTL configurable (default 13 months).
 - Materialized views: `usage_hourly_by_org_model`, `usage_hourly_by_project`, `usage_daily_by_key` — SummingMergeTree aggregates of tokens/requests/errors/latency quantiles.
 
-**Consumers of ClickHouse:** harvester writes (and its budget ledger reads month-to-date sums — gateways consume the `BUDGETS` KV projection, never ClickHouse); admin API `usage` endpoints read `usage_events` directly (see [design-usage.md](design-usage.md) §2); Grafana dashboards (planned, not built).
+**Consumers of ClickHouse:** harvester writes (and its budget ledger reads month-to-date sums — gateways consume the `BUDGETS` KV projection, never ClickHouse); admin API `usage` endpoints read `usage_events` directly (see [design-usage.md](design-usage.md) §2); Grafana dashboards (a starter dashboard ships in `deploy/grafana-usage.json`).
 
 ## 11. Budgets
 
@@ -195,7 +195,7 @@ inferbus/
 
 - One Docker image; role chosen by subcommand.
 - `docker compose up` quickstart: NATS (JetStream), Postgres, ClickHouse, gateway, one worker configured for a local Ollama, harvester. First-run bootstrap creates an org, a project, one API key (printed once), and a starter alias.
-- Observability today: `/healthz`/`/readyz` per role. OTEL traces/metrics and a Prometheus-format `/metrics` endpoint are planned, not built.
+- Observability today: `/healthz`/`/readyz` per role, plus a Prometheus-format `/metrics` endpoint on the **gateway and harvester** (M5; worker and controlplane metrics are not built). OTEL traces are planned, not built.
 
 ## 14. Porting plan (from the private scaffold)
 
@@ -224,7 +224,7 @@ inferbus/
 1. **M1 — Skeleton:** repo, binary + subcommands, wire contract, compose file with NATS/Postgres/ClickHouse.
 2. **M2 — Data path:** gateway (key auth, static aliases) → worker (Bifrost, one provider) → SSE; e2e streaming test green.
 3. **M3 — Control plane:** Postgres schema, admin API, KV alias projection, OIDC on admin routes.
-4. **M4 — Usage:** worker usage events, harvester, ClickHouse schema, budget enforcement. Grafana starter dashboard: planned, not built.
+4. **M4 — Usage:** worker usage events, harvester, ClickHouse schema, budget enforcement. (The Grafana starter dashboard slipped to M5.)
 5. **M5 — Hardening + launch:** built — admission control, `MODELS` KV worker presence + fleet listing, zero-config worker, Prometheus `/metrics` on gateway and harvester, cancel/redelivery e2e, docs, console mockup ([docs/design/console-mock](design/console-mock)), first public release. Grafana starter: shipped in `deploy/grafana-usage.json`.
 6. **M6 — Embeddings + named resolutions:** built — `POST /v1/embeddings` (`Engine.Embed` on `openai_http`/Bifrost/fakes, one `result` frame, `kind="embed"` usage), and `cpkv.AliasEntry.Params` activated end to end (gateway `mergeParams`, override-client-value semantics, reserved `model`/`stream` keys) so one concrete model can be exposed as several parameter-pinned aliases ("named resolutions") — see [docs/design-embeddings.md](design-embeddings.md). Released as v0.2.0.
 7. **V1.5:** priority tiers, claim-check blobs, shared rate counters. **V2:** functional console.
